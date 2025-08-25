@@ -1,0 +1,18 @@
+pkgname=awaos-pe-loader-git
+pkgver=r1
+pkgrel=1
+arch=('x86_64')
+provides=('awaos-pe-loader')
+depends=('glibc' 'gcc-libs')
+makedepends=('cmake' 'ninja' 'gcc-multilib')
+source=()
+sha256sums=()
+
+build() {
+  cmake -S "$srcdir/../.." -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+  cmake --build build
+}
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+  install -Dm644 "$srcdir/../../packaging/arch/binfmt/pe.conf" "$pkgdir/etc/binfmt.d/pe.conf"
+}
