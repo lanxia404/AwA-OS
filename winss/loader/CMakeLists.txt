@@ -1,0 +1,5 @@
+add_executable(pe_loader32 pe_loader32.c)
+target_compile_options(pe_loader32 PRIVATE -m32 -O2 -fno-plt -fvisibility=hidden)
+target_link_options(pe_loader32 PRIVATE -m32 -Wl,-z,now)
+target_link_libraries(pe_loader32 PRIVATE ntshim32)
+install(TARGETS pe_loader32 RUNTIME DESTINATION lib/awaos)
