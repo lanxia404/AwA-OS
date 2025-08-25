@@ -7,6 +7,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: pacman -Syu --noconfirm base-devel cmake ninja gcc-multilib
+      - run: pacman -S --noconfirm lib32-glibc lib32-gcc-libs
       - run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build
