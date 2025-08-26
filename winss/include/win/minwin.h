@@ -34,14 +34,20 @@ typedef DWORD*  LPDWORD;
 #ifndef LPBYTE
 typedef BYTE*   LPBYTE;
 #endif
+#ifndef LPCVOID
+typedef const void* LPCVOID;
+#endif
 
 typedef char*       LPSTR;
 typedef const char* LPCSTR;
 
-/* 寬字元（簡化，UTF-16 單元） */
 typedef unsigned short WCHAR;
 typedef WCHAR*       LPWSTR;
 typedef const WCHAR* LPCWSTR;
+
+#ifndef SIZE_T
+# define SIZE_T size_t
+#endif
 
 #ifndef UINT
 typedef unsigned int UINT;
@@ -110,3 +116,32 @@ typedef struct _PROCESS_INFORMATION {
   DWORD  dwProcessId;
   DWORD  dwThreadId;
 } PROCESS_INFORMATION;
+
+/* --- 常用 KERNEL32 原型（便於編譯檢查） --- */
+HANDLE WINAPI GetStdHandle(DWORD nStdHandle);
+BOOL   WINAPI ReadFile(HANDLE, LPVOID, DWORD, LPDWORD, LPVOID);
+BOOL   WINAPI WriteFile(HANDLE, LPCVOID, DWORD, LPDWORD, LPVOID);
+__attribute__((noreturn)) void WINAPI ExitProcess(UINT);
+
+BOOL   WINAPI CreateProcessA(LPCSTR, LPSTR, LPVOID, LPVOID, BOOL, DWORD, LPVOID, LPCSTR, STARTUPINFOA*, PROCESS_INFORMATION*);
+BOOL   WINAPI CreateProcessW(LPCWSTR, LPWSTR, LPVOID, LPVOID, BOOL, DWORD, LPVOID, LPCWSTR, STARTUPINFOW*, PROCESS_INFORMATION*);
+
+DWORD  WINAPI WaitForSingleObject(HANDLE, DWORD);
+BOOL   WINAPI GetExitCodeProcess(HANDLE, LPDWORD);
+BOOL   WINAPI CloseHandle(HANDLE);
+
+LPCSTR  WINAPI GetCommandLineA(void);
+LPCWSTR WINAPI GetCommandLineW(void);
+
+/* --- Threads & TLS --- */
+typedef DWORD (WINAPI *LPTHREAD_START_ROUTINE)(LPVOID lpParameter);
+
+HANDLE WINAPI CreateThread(LPVOID, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD);
+void   WINAPI ExitThread(DWORD);
+DWORD  WINAPI GetCurrentThreadId(void);
+void   WINAPI Sleep(DWORD);
+
+DWORD  WINAPI TlsAlloc(void);
+BOOL   WINAPI TlsFree(DWORD);
+BOOL   WINAPI TlsSetValue(DWORD, LPVOID);
+LPVOID WINAPI TlsGetValue(DWORD);

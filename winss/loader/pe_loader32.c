@@ -1,4 +1,4 @@
-// winss/loader/pe_loader32.c  — PE32 loader (imports + reloc) + set command line before entry
+// winss/loader/pe_loader32.c — PE32 loader (imports + reloc) + init TEB + set command line
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdint.h>
@@ -10,26 +10,26 @@
 #include <string.h>
 #include <errno.h>
 #include <ctype.h>
+#include "../include/win/minwin.h"
 
-#include "../include/win/minwin.h"  // 提供 WINAPI 等（不關鍵，但保持一致）
+/* 弱符號：若與 ntdll32 連結，能初始化 TEB；否則自動略過 */
+__attribute__((weak)) void* NtCurrentTeb(void);
+__attribute__((weak)) void nt_set_command_lineA(const char* s);
 
 #ifndef MAP_FIXED_NOREPLACE
 #define MAP_FIXED_NOREPLACE 0x100000
 #endif
 
 #pragma pack(push,1)
-typedef struct {
-  uint16_t e_magic; uint16_t e_cblp; uint16_t e_cp; uint16_t e_crlc;
+typedef struct { uint16_t e_magic; uint16_t e_cblp; uint16_t e_cp; uint16_t e_crlc;
   uint16_t e_cparhdr; uint16_t e_minalloc; uint16_t e_maxalloc; uint16_t e_ss;
   uint16_t e_sp; uint16_t e_csum; uint16_t e_ip; uint16_t e_cs; uint16_t e_lfarlc;
   uint16_t e_ovno; uint16_t e_res[4]; uint16_t e_oemid; uint16_t e_oeminfo;
-  uint16_t e_res2[10]; int32_t e_lfanew;
-} IMAGE_DOS_HEADER;
+  uint16_t e_res2[10]; int32_t e_lfanew; } IMAGE_DOS_HEADER;
 
 typedef struct { uint32_t VirtualAddress, Size; } IMAGE_DATA_DIRECTORY;
 
 #define IMAGE_NUMBEROF_DIRECTORY_ENTRIES 16
-#define IMAGE_DIRECTORY_ENTRY_EXPORT     0
 #define IMAGE_DIRECTORY_ENTRY_IMPORT     1
 #define IMAGE_DIRECTORY_ENTRY_BASERELOC  5
 
@@ -55,11 +55,7 @@ typedef struct {
   IMAGE_DATA_DIRECTORY DataDirectory[IMAGE_NUMBEROF_DIRECTORY_ENTRIES];
 } IMAGE_OPTIONAL_HEADER32;
 
-typedef struct {
-  uint32_t Signature;
-  IMAGE_FILE_HEADER FileHeader;
-  IMAGE_OPTIONAL_HEADER32 OptionalHeader;
-} IMAGE_NT_HEADERS32;
+typedef struct { uint32_t Signature; IMAGE_FILE_HEADER FileHeader; IMAGE_OPTIONAL_HEADER32 OptionalHeader; } IMAGE_NT_HEADERS32;
 
 typedef struct {
   uint8_t  Name[8];
@@ -69,42 +65,23 @@ typedef struct {
   uint32_t Characteristics;
 } IMAGE_SECTION_HEADER;
 
-typedef struct {
-  uint32_t   OriginalFirstThunk;
-  uint32_t   TimeDateStamp;
-  uint32_t   ForwarderChain;
-  uint32_t   Name;
-  uint32_t   FirstThunk;
-} IMAGE_IMPORT_DESCRIPTOR;
-
+typedef struct { uint32_t   OriginalFirstThunk, TimeDateStamp, ForwarderChain, Name, FirstThunk; } IMAGE_IMPORT_DESCRIPTOR;
 typedef struct { uint32_t u1; } IMAGE_THUNK_DATA32;
 #define IMAGE_ORDINAL_FLAG32 0x80000000
-
 typedef struct { uint16_t Hint; char Name[1]; } IMAGE_IMPORT_BY_NAME;
 
-typedef struct {
-  uint32_t VirtualAddress;
-  uint32_t SizeOfBlock;
-  // WORD TypeOffset[] follows
-} IMAGE_BASE_RELOCATION;
+typedef struct { uint32_t VirtualAddress, SizeOfBlock; } IMAGE_BASE_RELOCATION;
 #pragma pack(pop)
 
-/* 與 ntshim32.c 對應的 Hook 表型別 */
+/* 與 ntshim32 對應的 Hook 表 */
 struct Hook { const char* dll; const char* name; void* fn; };
 extern struct Hook NT_HOOKS[];
-
-/* 若與 ntshim32 連結，將拿到這個 setter；沒連結也不致崩（弱符號） */
-__attribute__((weak)) void nt_set_command_lineA(const char* s);
 
 static void die(const char* s){ perror(s); _exit(127); }
 static void* rva(void* base, uint32_t off){ return (off ? (uint8_t*)base + off : NULL); }
 
 static int ieq(const char* a, const char* b){
-  for (; *a && *b; ++a,++b){
-    int ca = tolower((unsigned char)*a);
-    int cb = tolower((unsigned char)*b);
-    if (ca != cb) return 0;
-  }
+  for (; *a && *b; ++a,++b){ int ca=tolower((unsigned char)*a), cb=tolower((unsigned char)*b); if (ca!=cb) return 0; }
   return *a==0 && *b==0;
 }
 
@@ -133,7 +110,7 @@ static void apply_relocs(void* image, IMAGE_NT_HEADERS32* nt, uint32_t actual_ba
   if (actual_base == pref) return;
 
   IMAGE_DATA_DIRECTORY dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
-  if (!dir.VirtualAddress || !dir.Size) return; // 沒有重定位表
+  if (!dir.VirtualAddress || !dir.Size) return;
 
   uint8_t* cur = (uint8_t*)rva(image, dir.VirtualAddress);
   uint8_t* end = cur + dir.Size;
@@ -154,36 +131,28 @@ static void apply_relocs(void* image, IMAGE_NT_HEADERS32* nt, uint32_t actual_ba
         uint32_t* slot = (uint32_t*)((uint8_t*)image + page + off);
         *slot += delta;
       }
-      // 其他型別暫不處理（PoC）
     }
     cur += blk->SizeOfBlock;
   }
 }
 
-/* 把 argv[1..] 組成 Windows 風格命令列（簡化：以空白分隔，不處理引號），設給 ntshim32 */
 static void set_cmdline_from_argv(int argc, char** argv){
-  if (!nt_set_command_lineA) return;    // 弱符號：若未連結 ntshim32，略過
+  if (!nt_set_command_lineA) return;
   if (argc <= 1){ nt_set_command_lineA(""); return; }
-
-  size_t len = 0;
-  for (int i=1;i<argc;i++) len += strlen(argv[i]) + 1;
-  if (len == 0) { nt_set_command_lineA(""); return; }
-
-  char* buf = (char*)malloc(len);
-  if (!buf){ nt_set_command_lineA(""); return; }
-
-  buf[0] = 0;
-  for (int i=1;i<argc;i++){
-    strcat(buf, argv[i]);
-    if (i+1<argc) strcat(buf, " ");
-  }
+  size_t len = 0; for (int i=1;i<argc;i++) len += strlen(argv[i]) + 1;
+  if (!len){ nt_set_command_lineA(""); return; }
+  char* buf = (char*)malloc(len); if (!buf){ nt_set_command_lineA(""); return; }
+  buf[0]=0;
+  for (int i=1;i<argc;i++){ strcat(buf, argv[i]); if (i+1<argc) strcat(buf," "); }
   nt_set_command_lineA(buf);
   free(buf);
 }
 
 int main(int argc, char** argv){
-  if (argc < 2){ fprintf(stderr,"usage: %s program.exe [args...]\n", argv[0]); return 2; }
+  if (NtCurrentTeb) NtCurrentTeb();            /* 初始化 TEB（若可用） */
+  set_cmdline_from_argv(argc, argv);           /* 先設命令列，便於早期使用 */
 
+  if (argc < 2){ fprintf(stderr,"usage: %s program.exe [args...]\n", argv[0]); return 2; }
   const char* path = argv[1];
   int fd = open(path, O_RDONLY);
   if (fd < 0) die("open exe");
@@ -202,43 +171,39 @@ int main(int argc, char** argv){
   uint32_t size_image  = nt->OptionalHeader.SizeOfImage;
   uint32_t size_hdrs   = nt->OptionalHeader.SizeOfHeaders;
 
-  // 1) 嘗試在 preferred base 映射；不行再隨機映射
-  void* image = map_image_at(image_base, size_image, /*try_fixed=*/1);
-
-  // 2) 複製 headers 與 sections
+  void* image = map_image_at(image_base, size_image, 1);
   memcpy(image, file, size_hdrs);
+
   IMAGE_SECTION_HEADER* sec = (IMAGE_SECTION_HEADER*)((uint8_t*)&nt->OptionalHeader + nt->FileHeader.SizeOfOptionalHeader);
   for (int i=0; i<nt->FileHeader.NumberOfSections; ++i){
-    void* dst = rva(image, sec[i].VirtualAddress);
+    void* dst = (uint8_t*)image + sec[i].VirtualAddress;
     size_t vsz = sec[i].Misc.VirtualSize;
     size_t rsz = sec[i].SizeOfRawData;
     if (rsz) memcpy(dst, file + sec[i].PointerToRawData, rsz);
-    if (vsz > rsz) memset((uint8_t*)dst + rsz, 0, vsz - rsz); // .bss
+    if (vsz > rsz) memset((uint8_t*)dst + rsz, 0, vsz - rsz);
   }
 
-  // 3) 若沒映在 preferred base，做重定位
   if ((uint32_t)(uintptr_t)image != image_base){
     apply_relocs(image, nt, (uint32_t)(uintptr_t)image);
   }
 
-  // 4) 修補 IAT（Imports）
   IMAGE_DATA_DIRECTORY impdir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
   if (impdir.VirtualAddress && impdir.Size){
-    for (IMAGE_IMPORT_DESCRIPTOR* d = (IMAGE_IMPORT_DESCRIPTOR*)rva(image, impdir.VirtualAddress);
+    for (IMAGE_IMPORT_DESCRIPTOR* d = (IMAGE_IMPORT_DESCRIPTOR*)((uint8_t*)image + impdir.VirtualAddress);
          d && d->Name; ++d){
-      const char* dll = (const char*)rva(image, d->Name);
+      const char* dll = (const char*)((uint8_t*)image + d->Name);
       if (!dll) continue;
 
-      IMAGE_THUNK_DATA32* oft = (IMAGE_THUNK_DATA32*)rva(image, d->OriginalFirstThunk);
-      IMAGE_THUNK_DATA32* ft  = (IMAGE_THUNK_DATA32*)rva(image, d->FirstThunk);
-      if (!oft) oft = ft; // 有些檔案沒 OFT
+      IMAGE_THUNK_DATA32* oft = (IMAGE_THUNK_DATA32*)((uint8_t*)image + d->OriginalFirstThunk);
+      IMAGE_THUNK_DATA32* ft  = (IMAGE_THUNK_DATA32*)((uint8_t*)image + d->FirstThunk);
+      if (!oft) oft = ft;
 
       for (; oft && oft->u1; ++oft, ++ft){
         if (oft->u1 & IMAGE_ORDINAL_FLAG32){
           fprintf(stderr, "Ordinal import not supported for %s\n", dll);
           return 1;
         }else{
-          IMAGE_IMPORT_BY_NAME* ibn = (IMAGE_IMPORT_BY_NAME*)rva(image, oft->u1);
+          IMAGE_IMPORT_BY_NAME* ibn = (IMAGE_IMPORT_BY_NAME*)((uint8_t*)image + oft->u1);
           const char* sym = (const char*)ibn->Name;
           void* fn = resolve_import(dll, sym);
           if (!fn){
@@ -251,13 +216,8 @@ int main(int argc, char** argv){
     }
   }
 
-  // 5) 在跳進入口前，設定命令列（給 GetCommandLineA/W）
-  set_cmdline_from_argv(argc-1, argv+1); // 讓程式看到 "program.exe [args...]"
-
-  // 6) 跳到入口點
-  void* entry = rva(image, nt->OptionalHeader.AddressOfEntryPoint);
+  void* entry = (uint8_t*)image + nt->OptionalHeader.AddressOfEntryPoint;
   if (!entry){ fprintf(stderr,"No entry\n"); return 1; }
-
   typedef void (WINAPI *entry_t)(void);
   ((entry_t)entry)();
   return 0;

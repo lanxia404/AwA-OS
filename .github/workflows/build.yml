@@ -84,3 +84,14 @@ jobs:
           grep -F "exit code: 0" cmdlite.out
           # 確認沒有未知指令錯誤
           ! grep -F "Unknown command" cmdlite.out
+
+      - name: Build & Run TLS demo
+        shell: bash
+        run: |
+          set -euxo pipefail
+          i686-w64-mingw32-gcc tests/win32-tls-demo/tls_demo.c -s -o tests/win32-tls-demo/tls_demo.exe \
+            -ffreestanding -fno-asynchronous-unwind-tables \
+            -nostdlib -Wl,--entry=_main@0 -Wl,--subsystem,console -lkernel32
+          out=$(/usr/lib/awaos/pe_loader32 ./tests/win32-tls-demo/tls_demo.exe || true)
+          echo "TLS_OUT=[$out]"
+          echo "$out" | grep -F "ok"
