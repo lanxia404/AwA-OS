@@ -1,13 +1,81 @@
-name: build
-on: [push, pull_request]
+name: build-and-test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  arch:
+  arch-x86_64-pe32:
     runs-on: ubuntu-latest
     container: archlinux:latest
+    defaults:
+      run:
+        shell: bash -euxo pipefail {0}
+
     steps:
-      - uses: actions/checkout@v4
-      - run: pacman -Syu --noconfirm base-devel cmake ninja gcc-multilib
-      - run: pacman -S --noconfirm lib32-glibc lib32-gcc-libs
-      - run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: System update
+        run: |
+          pacman -Syu --noconfirm
+
+      - name: Install toolchains & deps
+        run: |
+          pacman -S --noconfirm --needed \
+            git base-devel cmake ninja \
+            gcc-multilib lib32-glibc lib32-gcc-libs \
+            mingw-w64-gcc
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure & Build (AwA-OS)
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr
           cmake --build build
+
+      - name: Install loader
+        run: |
+          cmake --install build
+          file /usr/lib/awaos/pe_loader32
+          ldd  /usr/lib/awaos/pe_loader32
+
+      - name: Build PE32 test exes (hello, cmdlite)
+        run: |
+          i686-w64-mingw32-gcc tests/win32-hello/hello.c -s -o tests/win32-hello/hello.exe \
+            -ffreestanding -fno-asynchronous-unwind-tables \
+            -nostdlib -Wl,--entry=_main@0 -Wl,--subsystem,console -lkernel32
+
+          i686-w64-mingw32-gcc tests/win32-cmdlite/cmdlite.c -s -o tests/win32-cmdlite/cmdlite.exe \
+            -ffreestanding -fno-asynchronous-unwind-tables \
+            -nostdlib -Wl,--entry=_main@0 -Wl,--subsystem,console -lkernel32
+
+          file tests/win32-hello/hello.exe
+          file tests/win32-cmdlite/cmdlite.exe
+
+      - name: Smoke test: hello.exe via loader
+        run: |
+          out=$(/usr/lib/awaos/pe_loader32 ./tests/win32-hello/hello.exe || true)
+          echo "OUTPUT => [$out]"
+          # 寬鬆比對關鍵字，避免訊息微調造成誤判
+          grep -E "Hello|AwA-OS|AwAOS|WinSS" <<<"$out"
+
+      - name: Integration test: cmdlite run hello.exe
+        run: |
+          printf "run ./tests/win32-hello/hello.exe\nexit\n" \
+            | /usr/lib/awaos/pe_loader32 ./tests/win32-cmdlite/cmdlite.exe > cmdlite.out
+
+          echo "==== cmdlite.out ===="
+          cat cmdlite.out
+
+          # 驗證 run 的退出碼回報
+          grep -F "exit code: 0" cmdlite.out
+          # 確認沒有未知指令錯誤
+          ! grep -F "Unknown command" cmdlite.out
