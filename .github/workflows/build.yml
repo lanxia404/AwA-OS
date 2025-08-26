@@ -66,93 +66,13 @@ jobs:
           file tests/win32-cmdlite/cmdlite.exe
 
       - name: Smoke test hello.exe
-        shell: bash
-        run: |
-          set -euxo pipefail
-          out=$(/usr/lib/awaos/pe_loader32 ./tests/win32-hello/hello.exe || true)
-          echo "OUTPUT => [$out]"
-          echo "$out" | grep -E "Hello|AwA-OS|AwAOS|WinSS"
-
-      - name: Integration test cmdlite run hello.exe
-        shell: bash
-        run: |
-          set -euxo pipefail
-          printf "run ./tests/win32-hello/hello.exe\nexit\n" \
-            | /usr/lib/awaos/pe_loader32 ./tests/win32-cmdlite/cmdlite.exe > cmdlite.out
-          echo "==== cmdlite.out ===="
-          cat cmdlite.out
-          grep -F "exit code: 0" cmdlite.out
-          ! grep -F "Unknown command" cmdlite.out      - name: Configure & Build (AwA-OS)
-        run: |
-          cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=/usr
-          cmake --build build
-
-      - name: Install loader
-        run: |
-          cmake --install build
-          file /usr/lib/awaos/pe_loader32 || true
-          ldd  /usr/lib/awaos/pe_loader32 || true
-
-      - name: Build PE32 test exes (hello, cmdlite)
-        run: |
-          i686-w64-mingw32-gcc tests/win32-hello/hello.c -s -o tests/win32-hello/hello.exe \
-            -ffreestanding -fno-asynchronous-unwind-tables \
-            -nostdlib -Wl,--entry=_main@0 -Wl,--subsystem,console -lkernel32
-          i686-w64-mingw32-gcc tests/win32-cmdlite/cmdlite.c -s -o tests/win32-cmdlite/cmdlite.exe \
-            -ffreestanding -fno-asynchronous-unwind-tables \
-            -nostdlib -Wl,--entry=_main@0 -Wl,--subsystem,console -lkernel32
-          file tests/win32-hello/hello.exe
-          file tests/win32-cmdlite/cmdlite.exe
-
-      - name: Smoke test: hello.exe via loader
-        run: |
-          out=$(/usr/lib/awaos/pe_loader32 ./tests/win32-hello/hello.exe || true)
-          echo "OUTPUT => [$out]"
-          echo "$out" | grep -E "Hello|AwA-OS|AwAOS|WinSS"
-
-      - name: Integration test: cmdlite run hello.exe
-        run: |
-          printf "run ./tests/win32-hello/hello.exe\nexit\n" | \
-            /usr/lib/awaos/pe_loader32 ./tests/win32-cmdlite/cmdlite.exe > cmdlite.out
-          echo "==== cmdlite.out ===="
-          cat cmdlite.out
-          grep -F "exit code: 0" cmdlite.out
-          ! grep -F "Unknown command" cmdlite.out      - name: Configure & Build (AwA-OS)
-        run: |
-          cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=/usr
-          cmake --build build
-
-      - name: Install loader
-        run: |
-          cmake --install build
-          file /usr/lib/awaos/pe_loader32
-          ldd  /usr/lib/awaos/pe_loader32
-
-      - name: Build PE32 test exes (hello, cmdlite)
-        run: |
-          i686-w64-mingw32-gcc tests/win32-hello/hello.c -s -o tests/win32-hello/hello.exe \
-            -ffreestanding -fno-asynchronous-unwind-tables \
-            -nostdlib -Wl,--entry=_main@0 -Wl,--subsystem,console -lkernel32
-
-          i686-w64-mingw32-gcc tests/win32-cmdlite/cmdlite.c -s -o tests/win32-cmdlite/cmdlite.exe \
-            -ffreestanding -fno-asynchronous-unwind-tables \
-            -nostdlib -Wl,--entry=_main@0 -Wl,--subsystem,console -lkernel32
-
-          file tests/win32-hello/hello.exe
-          file tests/win32-cmdlite/cmdlite.exe
-
-      - name: Smoke test: hello.exe via loader
         run: |
           out=$(/usr/lib/awaos/pe_loader32 ./tests/win32-hello/hello.exe || true)
           echo "OUTPUT => [$out]"
           # 寬鬆比對關鍵字，避免訊息微調造成誤判
           grep -E "Hello|AwA-OS|AwAOS|WinSS" <<<"$out"
 
-      - name: Integration test: cmdlite run hello.exe
+      - name: Integration test cmdlite run hello.exe
         run: |
           printf "run ./tests/win32-hello/hello.exe\nexit\n" \
             | /usr/lib/awaos/pe_loader32 ./tests/win32-cmdlite/cmdlite.exe > cmdlite.out
