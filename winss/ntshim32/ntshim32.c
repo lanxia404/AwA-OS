@@ -51,9 +51,9 @@ struct Hook { const char* dll; const char* name; void* fn; };
 /* 注意大小寫——Windows 對匯入名大小寫敏感度低，但PoC優先匹配 */
 __attribute__((visibility("default")))
 struct Hook NT_HOOKS[] = {
-  {"KERNEL32.DLL", "GetStdHandle", GetStdHandle},
-  {"KERNEL32.DLL", "WriteFile",    WriteFile},
-  {"KERNEL32.DLL", "ReadFile",     ReadFile},
-  {"KERNEL32.DLL", "ExitProcess",  ExitProcess},
+  {"KERNEL32.DLL", "GetStdHandle", (void*)GetStdHandle},
+  {"KERNEL32.DLL", "WriteFile",    (void*)WriteFile},
+  {"KERNEL32.DLL", "ReadFile",     (void*)ReadFile},
+  {"KERNEL32.DLL", "ExitProcess",  (void*)ExitProcess},
   {NULL, NULL, NULL}
 };
