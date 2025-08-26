@@ -34,8 +34,9 @@
 
 2. 安裝建置與 32 位相依（關鍵）
 
-``sudo pacman -S --needed base-devel cmake ninja gcc-multilib lib32-glibc lib32-gcc-libs mingw-w64-gcc``
-
+```bash
+sudo pacman -S --needed base-devel cmake ninja gcc-multilib lib32-glibc lib32-gcc-libs mingw-w64-gcc
+```
 > pe_loader32 是 32 位 ELF；在 x86_64 Arch 執行它需要 lib32-glibc 與 lib32-gcc-libs。
 
 
@@ -47,17 +48,20 @@
 
 建置
 
+```bash
 git clone https://github.com/lanxia404/AwA-OS.git
 cd AwA-OS
 mkdir -p build && cd build
 cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr ..
 ninja
+```
 
 快速檢查：
 
+```bash
 file winss/loader/pe_loader32
 ldd  winss/loader/pe_loader32
-
+```
 
 ---
 
@@ -65,8 +69,7 @@ ldd  winss/loader/pe_loader32
 
 > 目的：把 loader 安裝到 /usr/lib/awaos/pe_loader32，並讓 .exe 可直接執行。
 
-
-
+```bash
 # 安裝（會安到 /usr/lib/awaos/pe_loader32）
 sudo cmake --install .
 
@@ -82,7 +85,7 @@ sudo cat /proc/sys/fs/binfmt_misc/pe32ex   # 路徑應指向 /usr/lib/awaos/pe_l
 
 > 若未掛載 binfmt：
 sudo mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc
-
+```
 
 
 
