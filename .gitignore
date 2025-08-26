@@ -1,0 +1,69 @@
+# --- Build directories ---
+/build/
+/build-*/
+/out/
+/bin/
+/lib/
+
+# --- C/C++ objects & libs ---
+*.o
+*.obj
+*.lo
+*.la
+*.a
+*.lib
+
+# --- Shared/exec artifacts ---
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.out
+
+# --- C/C++ misc ---
+*.gch
+*.pch
+*.d
+*.gcno
+*.gcda
+*.gcov
+
+# --- CMake/Ninja ---
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+*.cmake
+.ninja_deps
+.ninja_log
+
+# --- Logs / dumps ---
+*.log
+core
+core.*
+
+# --- Editors/IDE ---
+.vscode/
+.idea/
+*.code-workspace
+*.swp
+*.swo
+
+# --- OS junk ---
+.DS_Store
+Thumbs.db
+
+# --- Packaging (Arch makepkg outputs) ---
+packaging/arch/awaos-pe-loader/src/
+packaging/arch/awaos-pe-loader/pkg/
+*.pkg.tar.zst
+*.pkg.tar.xz
+
+# --- Tests (binaries produced locally) ---
+tests/**/hello.exe
+
+# Note: 若未來上傳到 AUR，請保留 .SRCINFO 不要忽略
+#（因此此處不忽略 .SRCINFO）
