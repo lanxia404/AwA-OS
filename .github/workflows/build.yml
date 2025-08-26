@@ -65,7 +65,7 @@ jobs:
           file tests/win32-hello/hello.exe
           file tests/win32-cmdlite/cmdlite.exe
 
-      - name: Smoke test: hello.exe via loader
+      - name: Smoke test hello.exe
         shell: bash
         run: |
           set -euxo pipefail
@@ -73,7 +73,7 @@ jobs:
           echo "OUTPUT => [$out]"
           echo "$out" | grep -E "Hello|AwA-OS|AwAOS|WinSS"
 
-      - name: Integration test: cmdlite run hello.exe
+      - name: Integration test cmdlite run hello.exe
         shell: bash
         run: |
           set -euxo pipefail
