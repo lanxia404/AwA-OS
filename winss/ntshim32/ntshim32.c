@@ -29,6 +29,17 @@ BOOL WINAPI WriteFile(HANDLE h, const void* buf, DWORD len, DWORD* written, void
   return (n >= 0) ? TRUE : FALSE;
 }
 
+// 追加 ReadFile 的最小實作
+BOOL WINAPI ReadFile(HANDLE h, LPVOID buf, DWORD toRead, LPDWORD out, LPVOID overlapped) {
+  (void)overlapped;
+  int fd = (int)(uintptr_t)h;        // 我們用 0/1/2 對應 stdin/stdout/stderr
+  if (toRead == 0) { if (out) *out = 0; return TRUE; }
+  ssize_t n = read(fd, buf, (size_t)toRead);
+  if (n < 0) return FALSE;
+  if (out) *out = (DWORD)n;
+  return TRUE;
+}
+
 __attribute__((noreturn)) void WINAPI ExitProcess(UINT code) {
   _exit((int)code);
 }
@@ -40,20 +51,9 @@ struct Hook { const char* dll; const char* name; void* fn; };
 /* 注意大小寫——Windows 對匯入名大小寫敏感度低，但PoC優先匹配 */
 __attribute__((visibility("default")))
 struct Hook NT_HOOKS[] = {
-  {"KERNEL32.DLL", "GetStdHandle", (void*)GetStdHandle},
-  {"KERNEL32.DLL", "WriteFile",    (void*)WriteFile},
-  {"KERNEL32.DLL", "ReadFile",     (void*)ReadFile},
-  {"KERNEL32.DLL", "ExitProcess",  (void*)ExitProcess},
+  {"KERNEL32.DLL", "GetStdHandle", GetStdHandle},
+  {"KERNEL32.DLL", "WriteFile",    WriteFile},
+  {"KERNEL32.DLL", "ReadFile",     ReadFile},
+  {"KERNEL32.DLL", "ExitProcess",  ExitProcess},
   {NULL, NULL, NULL}
 };
-
-// 追加 ReadFile 的最小實作
-BOOL WINAPI ReadFile(HANDLE h, LPVOID buf, DWORD toRead, LPDWORD out, LPVOID overlapped) {
-  (void)overlapped;
-  int fd = (int)(uintptr_t)h;        // 我們用 0/1/2 對應 stdin/stdout/stderr
-  if (toRead == 0) { if (out) *out = 0; return TRUE; }
-  ssize_t n = read(fd, buf, (size_t)toRead);
-  if (n < 0) return FALSE;
-  if (out) *out = (DWORD)n;
-  return TRUE;
-}
