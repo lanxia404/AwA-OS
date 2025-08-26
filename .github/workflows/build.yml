@@ -15,17 +15,18 @@ jobs:
   arch-x86_64-pe32:
     runs-on: ubuntu-latest
     container: archlinux:latest
-    defaults:
-      run:
-        shell: bash -euxo pipefail {0}
 
     steps:
       - name: System update
+        shell: bash
         run: |
+          set -euxo pipefail
           pacman -Syu --noconfirm
 
       - name: Install toolchains & deps
+        shell: bash
         run: |
+          set -euxo pipefail
           pacman -S --noconfirm --needed \
             git base-devel cmake ninja \
             gcc-multilib lib32-glibc lib32-gcc-libs \
@@ -35,41 +36,43 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Configure & Build (AwA-OS)
+        shell: bash
         run: |
+          set -euxo pipefail
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=/usr
           cmake --build build
 
       - name: Install loader
+        shell: bash
         run: |
+          set -euxo pipefail
           cmake --install build
-          file /usr/lib/awaos/pe_loader32
-          ldd  /usr/lib/awaos/pe_loader32
+          file /usr/lib/awaos/pe_loader32 || true
+          ldd  /usr/lib/awaos/pe_loader32 || true
 
       - name: Build PE32 test exes (hello, cmdlite)
+        shell: bash
         run: |
+          set -euxo pipefail
           i686-w64-mingw32-gcc tests/win32-hello/hello.c -s -o tests/win32-hello/hello.exe \
             -ffreestanding -fno-asynchronous-unwind-tables \
             -nostdlib -Wl,--entry=_main@0 -Wl,--subsystem,console -lkernel32
-
           i686-w64-mingw32-gcc tests/win32-cmdlite/cmdlite.c -s -o tests/win32-cmdlite/cmdlite.exe \
             -ffreestanding -fno-asynchronous-unwind-tables \
             -nostdlib -Wl,--entry=_main@0 -Wl,--subsystem,console -lkernel32
-
           file tests/win32-hello/hello.exe
           file tests/win32-cmdlite/cmdlite.exe
 
-      - name: Smoke 
-        test: hello.exe via loader
+      - name: Smoke test hello.exe
         run: |
           out=$(/usr/lib/awaos/pe_loader32 ./tests/win32-hello/hello.exe || true)
           echo "OUTPUT => [$out]"
           # 寬鬆比對關鍵字，避免訊息微調造成誤判
           grep -E "Hello|AwA-OS|AwAOS|WinSS" <<<"$out"
 
-      - name: Integration 
-        test: cmdlite run hello.exe
+      - name: Integration test cmdlite run hello.exe
         run: |
           printf "run ./tests/win32-hello/hello.exe\nexit\n" \
             | /usr/lib/awaos/pe_loader32 ./tests/win32-cmdlite/cmdlite.exe > cmdlite.out
