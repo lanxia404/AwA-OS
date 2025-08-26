@@ -1,4 +1,4 @@
-// winss/loader/pe_loader32.c  (PoC, minimal PE32 loader with reloc + imports)
+// winss/loader/pe_loader32.c  — PE32 loader (imports + reloc) + set command line before entry
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdint.h>
@@ -11,7 +11,7 @@
 #include <errno.h>
 #include <ctype.h>
 
-#include "../include/win/minwin.h"
+#include "../include/win/minwin.h"  // 提供 WINAPI 等（不關鍵，但保持一致）
 
 #ifndef MAP_FIXED_NOREPLACE
 #define MAP_FIXED_NOREPLACE 0x100000
@@ -77,16 +77,10 @@ typedef struct {
   uint32_t   FirstThunk;
 } IMAGE_IMPORT_DESCRIPTOR;
 
-typedef struct {
-  uint32_t u1;
-} IMAGE_THUNK_DATA32;
-
+typedef struct { uint32_t u1; } IMAGE_THUNK_DATA32;
 #define IMAGE_ORDINAL_FLAG32 0x80000000
 
-typedef struct {
-  uint16_t Hint;
-  char     Name[1];
-} IMAGE_IMPORT_BY_NAME;
+typedef struct { uint16_t Hint; char Name[1]; } IMAGE_IMPORT_BY_NAME;
 
 typedef struct {
   uint32_t VirtualAddress;
@@ -95,18 +89,27 @@ typedef struct {
 } IMAGE_BASE_RELOCATION;
 #pragma pack(pop)
 
+/* 與 ntshim32.c 對應的 Hook 表型別 */
 struct Hook { const char* dll; const char* name; void* fn; };
 extern struct Hook NT_HOOKS[];
+
+/* 若與 ntshim32 連結，將拿到這個 setter；沒連結也不致崩（弱符號） */
+__attribute__((weak)) void nt_set_command_lineA(const char* s);
 
 static void die(const char* s){ perror(s); _exit(127); }
 static void* rva(void* base, uint32_t off){ return (off ? (uint8_t*)base + off : NULL); }
 
 static int ieq(const char* a, const char* b){
-  for (; *a && *b; ++a,++b){ if (tolower((unsigned char)*a)!=tolower((unsigned char)*b)) return 0; }
+  for (; *a && *b; ++a,++b){
+    int ca = tolower((unsigned char)*a);
+    int cb = tolower((unsigned char)*b);
+    if (ca != cb) return 0;
+  }
   return *a==0 && *b==0;
 }
 
 static void* resolve_import(const char* dll, const char* sym){
+  if (!NT_HOOKS) return NULL;
   for (struct Hook* h=NT_HOOKS; h->dll; ++h){
     if (ieq(h->dll, dll) && strcmp(h->name, sym)==0) return h->fn;
   }
@@ -130,7 +133,7 @@ static void apply_relocs(void* image, IMAGE_NT_HEADERS32* nt, uint32_t actual_ba
   if (actual_base == pref) return;
 
   IMAGE_DATA_DIRECTORY dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
-  if (!dir.VirtualAddress || !dir.Size) return; // nothing to do
+  if (!dir.VirtualAddress || !dir.Size) return; // 沒有重定位表
 
   uint8_t* cur = (uint8_t*)rva(image, dir.VirtualAddress);
   uint8_t* end = cur + dir.Size;
@@ -151,10 +154,31 @@ static void apply_relocs(void* image, IMAGE_NT_HEADERS32* nt, uint32_t actual_ba
         uint32_t* slot = (uint32_t*)((uint8_t*)image + page + off);
         *slot += delta;
       }
-      // 其他型別（如 HIGH/LOW）不處理，PoC 用不到
+      // 其他型別暫不處理（PoC）
     }
     cur += blk->SizeOfBlock;
   }
+}
+
+/* 把 argv[1..] 組成 Windows 風格命令列（簡化：以空白分隔，不處理引號），設給 ntshim32 */
+static void set_cmdline_from_argv(int argc, char** argv){
+  if (!nt_set_command_lineA) return;    // 弱符號：若未連結 ntshim32，略過
+  if (argc <= 1){ nt_set_command_lineA(""); return; }
+
+  size_t len = 0;
+  for (int i=1;i<argc;i++) len += strlen(argv[i]) + 1;
+  if (len == 0) { nt_set_command_lineA(""); return; }
+
+  char* buf = (char*)malloc(len);
+  if (!buf){ nt_set_command_lineA(""); return; }
+
+  buf[0] = 0;
+  for (int i=1;i<argc;i++){
+    strcat(buf, argv[i]);
+    if (i+1<argc) strcat(buf, " ");
+  }
+  nt_set_command_lineA(buf);
+  free(buf);
 }
 
 int main(int argc, char** argv){
@@ -192,7 +216,7 @@ int main(int argc, char** argv){
     if (vsz > rsz) memset((uint8_t*)dst + rsz, 0, vsz - rsz); // .bss
   }
 
-  // 3) 若沒有映射在 preferred base，做重定位
+  // 3) 若沒映在 preferred base，做重定位
   if ((uint32_t)(uintptr_t)image != image_base){
     apply_relocs(image, nt, (uint32_t)(uintptr_t)image);
   }
@@ -211,7 +235,6 @@ int main(int argc, char** argv){
 
       for (; oft && oft->u1; ++oft, ++ft){
         if (oft->u1 & IMAGE_ORDINAL_FLAG32){
-          // 以序號匯入：PoC 先不處理
           fprintf(stderr, "Ordinal import not supported for %s\n", dll);
           return 1;
         }else{
@@ -228,12 +251,13 @@ int main(int argc, char** argv){
     }
   }
 
-  // 5) 跳到入口點
+  // 5) 在跳進入口前，設定命令列（給 GetCommandLineA/W）
+  set_cmdline_from_argv(argc-1, argv+1); // 讓程式看到 "program.exe [args...]"
+
+  // 6) 跳到入口點
   void* entry = rva(image, nt->OptionalHeader.AddressOfEntryPoint);
   if (!entry){ fprintf(stderr,"No entry\n"); return 1; }
 
-  // 把 argv[1] 開始的參數左移一格，模擬成被載入的程式的 argv
-  argv[1] = argv[0]; // 不特別調整也行；PoC 並不使用 argv
   typedef void (WINAPI *entry_t)(void);
   ((entry_t)entry)();
   return 0;
