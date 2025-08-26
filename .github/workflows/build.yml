@@ -60,14 +60,16 @@ jobs:
           file tests/win32-hello/hello.exe
           file tests/win32-cmdlite/cmdlite.exe
 
-      - name: Smoke test: hello.exe via loader
+      - name: Smoke 
+        test: hello.exe via loader
         run: |
           out=$(/usr/lib/awaos/pe_loader32 ./tests/win32-hello/hello.exe || true)
           echo "OUTPUT => [$out]"
           # 寬鬆比對關鍵字，避免訊息微調造成誤判
           grep -E "Hello|AwA-OS|AwAOS|WinSS" <<<"$out"
 
-      - name: Integration test: cmdlite run hello.exe
+      - name: Integration 
+        test: cmdlite run hello.exe
         run: |
           printf "run ./tests/win32-hello/hello.exe\nexit\n" \
             | /usr/lib/awaos/pe_loader32 ./tests/win32-cmdlite/cmdlite.exe > cmdlite.out
