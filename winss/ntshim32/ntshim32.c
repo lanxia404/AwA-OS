@@ -42,6 +42,7 @@ __attribute__((visibility("default")))
 struct Hook NT_HOOKS[] = {
   {"KERNEL32.DLL", "GetStdHandle", (void*)GetStdHandle},
   {"KERNEL32.DLL", "WriteFile",    (void*)WriteFile},
+  {"KERNEL32.DLL", "ReadFile",     (void*)ReadFile},
   {"KERNEL32.DLL", "ExitProcess",  (void*)ExitProcess},
   {NULL, NULL, NULL}
 };
