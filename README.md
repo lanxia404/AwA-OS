@@ -34,7 +34,7 @@
 
 2. 安裝建置與 32 位相依（關鍵）
 
-sudo pacman -S --needed base-devel cmake ninja gcc-multilib lib32-glibc lib32-gcc-libs mingw-w64-gcc
+``sudo pacman -S --needed base-devel cmake ninja gcc-multilib lib32-glibc lib32-gcc-libs mingw-w64-gcc``
 
 > pe_loader32 是 32 位 ELF；在 x86_64 Arch 執行它需要 lib32-glibc 與 lib32-gcc-libs。
 
