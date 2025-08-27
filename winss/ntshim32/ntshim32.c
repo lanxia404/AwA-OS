@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>              /* <-- for getenv */
 #include "../include/win/minwin.h"
 #include "../ntshim32/ntshim_api.h"
 
@@ -20,12 +21,11 @@ static int is_log(void){
 static char g_cmdlineA[1024] = {0};
 
 void nt_set_command_lineA(const char* path, const char* argv){
-  /* 產生："path" + [空白 + argv] */
   char* p = g_cmdlineA;
   size_t cap = sizeof(g_cmdlineA);
   size_t n = 0;
-
   g_cmdlineA[0] = 0;
+
   if(path && *path){
     if(n + 1 < cap) g_cmdlineA[n++] = '"';
     while(*path && n + 1 < cap) g_cmdlineA[n++] = *path++;
@@ -45,7 +45,7 @@ static int map_handle(HANDLE h){
   if(v == (DWORD)-10) return 0;  /* stdin  */
   if(v == (DWORD)-11) return 1;  /* stdout */
   if(v == (DWORD)-12) return 2;  /* stderr */
-  return -1; /* 其他交給執行緒/行程假句柄處理或直接忽略 */
+  return -1;
 }
 
 /* ---- KERNEL32.DLL 模擬 ---- */
@@ -80,7 +80,7 @@ __attribute__((noreturn)) VOID WINAPI ExitProcess(UINT code){
   _exit((int)code);
 }
 
-/* GetStartupInfoA：最小填充（交互用不到實際控制台繫結） */
+/* GetStartupInfoA：最小填充 */
 VOID WINAPI GetStartupInfoA(LPSTARTUPINFOA psi){
   if(!psi) return;
   STARTUPINFOA si;
@@ -92,11 +92,7 @@ VOID WINAPI GetStartupInfoA(LPSTARTUPINFOA psi){
   *psi = si;
 }
 
-/* 假行程模型：
- *  - CreateProcessA 直接呼叫 pe32_spawn()「同步」執行
- *  - WaitForSingleObject 立即返回已訊號
- *  - GetExitCodeProcess 回傳我們記錄的上次退出碼
- *  注意：這是 PoC，之後會改成真正的子執行緒/子程序模型。 */
+/* 假行程模型（同步呼叫 pe32_spawn） */
 static DWORD g_last_exit = 0;
 static HANDLE g_proc_handle = (HANDLE)(uintptr_t)0x1111;
 
@@ -113,9 +109,7 @@ BOOL WINAPI CreateProcessA(
     LOGF("CreateProcessA: appName NULL"); return FALSE;
   }
 
-  /* 將命令列也寫進 GetCommandLineA */
-  nt_set_command_lineA(appName,
-    (cmdLine && *cmdLine) ? cmdLine : NULL);
+  nt_set_command_lineA(appName, (cmdLine && *cmdLine) ? cmdLine : NULL);
 
   LOGF("CreateProcessA app='%s' cmdline='%s'",
        appName, (cmdLine ? cmdLine : "(null)"));
@@ -148,10 +142,8 @@ BOOL WINAPI CloseHandle(HANDLE h){
   return TRUE;
 }
 
-/* GetCommandLineA 回傳我們的緩衝 */
 LPCSTR WINAPI GetCommandLineA(void){
   return g_cmdlineA[0] ? g_cmdlineA : "";
 }
 
-/* ---- 其他 API 的匯出實際在 ntdll32/*.c，各自已定義 ---- */
-/* SetLastError / GetLastError / TLS / Thread 等由 error.c / tls.c / thread.c 提供 */
+/* SetLastError/GetLastError/TLS/Thread 由 ntdll32/*.c 提供 */
