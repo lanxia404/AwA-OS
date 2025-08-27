@@ -1,12 +1,5 @@
 // winss/ntshim32/ntshim32.c
 // KERNEL32 32-bit minimal shim for AwA-OS / WinSS
-//  - Map STD_* handles to Linux fd 0/1/2
-//  - WriteFile / ReadFile (works with redirection/pipes) + verbose logging
-//  - ExitProcess / CloseHandle / WaitForSingleObject / GetExitCodeProcess / GetStartupInfoA
-//  - CreateProcessA: minimal stub (測試用，回傳成功；不真正啟動子行程)
-//  - GetCommandLineA + nt_set_command_lineA storage
-//  - Export table NT_HOOKS for loader binding
-
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,13 +32,25 @@ typedef void VOID;
 static int _log_enabled = 0;
 #define LOGF(...) do{ if(_log_enabled){ fprintf(stderr,"[ntshim32] " __VA_ARGS__); fputc('\n',stderr);} }while(0)
 
-/* 可能來自 ntdll32 的 thread helper（弱符號，缺席也能鏈結） */
+/* 有些 thread 幫手由 ntdll32/thread.c 提供（弱符號，缺席也能鏈結） */
 __attribute__((weak)) int   _nt_is_thread_handle(HANDLE h);
 __attribute__((weak)) BOOL  _nt_close_thread(HANDLE h);
 __attribute__((weak)) DWORD _nt_wait_thread(HANDLE h, DWORD ms);
 __attribute__((weak)) BOOL  _nt_get_thread_exit_code(HANDLE h, LPDWORD code);
 
-/* ---- 命令列儲存區 ---- */
+/* TLS / Thread API 來自 ntdll32/（這裡宣告原型供 NT_HOOKS 取址） */
+extern DWORD WINAPI TlsAlloc(void);
+extern BOOL  WINAPI TlsFree(DWORD idx);
+extern LPVOID WINAPI TlsGetValue(DWORD idx);
+extern BOOL  WINAPI TlsSetValue(DWORD idx, LPVOID val);
+
+extern HANDLE WINAPI CreateThread(LPVOID sa, SIZE_T stack,
+  LPTHREAD_START_ROUTINE start, LPVOID param, DWORD flags, LPDWORD tid);
+extern VOID   WINAPI ExitThread(DWORD code);
+extern VOID   WINAPI Sleep(DWORD ms);
+extern DWORD  WINAPI GetCurrentThreadId(void);
+
+/* ---- 命令列儲存區（供 GetCommandLineA） ---- */
 static char g_cmdlineA[1024] = {0};
 
 __attribute__((visibility("default")))
@@ -57,6 +62,7 @@ void nt_set_command_lineA(const char* s) {
   g_cmdlineA[n] = 0;
 }
 
+/* ---- 句柄映射 ---- */
 static int map_handle(HANDLE h) {
   DWORD key = (DWORD)(uintptr_t)h;
   if (key == (DWORD)-10) return 0; // STD_INPUT_HANDLE
@@ -65,8 +71,7 @@ static int map_handle(HANDLE h) {
   return -1;
 }
 
-/* ---- kernel32 exports ---- */
-
+/* ---- KERNEL32 exports：I/O ---- */
 HANDLE WINAPI GetStdHandle(DWORD nStdHandle) {
   if (getenv("AWAOS_LOG")) _log_enabled = 1;
   return (HANDLE)(uintptr_t)nStdHandle;
@@ -94,7 +99,6 @@ BOOL WINAPI ReadFile(HANDLE h, LPVOID buf, DWORD toRead, LPDWORD out, LPVOID ove
 
   int fd = map_handle(h);
   if (fd < 0) { SetLastError(6 /*ERROR_INVALID_HANDLE*/); return FALSE; }
-
   if (toRead == 0) return TRUE;
 
   ssize_t n = read(fd, buf, (size_t)toRead);
@@ -111,6 +115,7 @@ __attribute__((noreturn)) void WINAPI ExitProcess(UINT code) {
   _exit((int)code);
 }
 
+/* ---- KERNEL32 exports：handles/wait/exitcode ---- */
 BOOL WINAPI CloseHandle(HANDLE h) {
   int fd = map_handle(h);
   if (fd >= 0) return TRUE;
@@ -152,10 +157,10 @@ VOID WINAPI GetStartupInfoA(STARTUPINFOA* psi) {
   psi->hStdError  = (HANDLE)(uintptr_t)STD_ERROR_HANDLE;
 }
 
-/* 與目前 minwin.h 一致：回傳 LPCSTR（const） */
+/* 與現行 minwin.h 宣告一致（LPCSTR） */
 LPCSTR WINAPI GetCommandLineA(void) { return g_cmdlineA; }
 
-/* 測試用 stub：回傳成功，不真正啟動行程 */
+/* 測試用 stub：回傳成功（不真正啟動子行程） */
 BOOL WINAPI CreateProcessA(
   LPCSTR app, LPSTR cmdline,
   LPVOID psa, LPVOID tsa, BOOL inherit, DWORD flags,
@@ -173,18 +178,34 @@ BOOL WINAPI CreateProcessA(
   return TRUE;
 }
 
-/* 匯出表給載入器綁定 */
+/* ---- 匯出表：補上 Thread/TLS API ---- */
 __attribute__((visibility("default")))
 struct Hook NT_HOOKS[] = {
+  /* I/O */
   {"KERNEL32.DLL", "GetStdHandle",        (void*)GetStdHandle},
   {"KERNEL32.DLL", "WriteFile",           (void*)WriteFile},
   {"KERNEL32.DLL", "ReadFile",            (void*)ReadFile},
   {"KERNEL32.DLL", "ExitProcess",         (void*)ExitProcess},
+
+  /* handles/wait/exit */
   {"KERNEL32.DLL", "CloseHandle",         (void*)CloseHandle},
   {"KERNEL32.DLL", "WaitForSingleObject", (void*)WaitForSingleObject},
   {"KERNEL32.DLL", "GetExitCodeProcess",  (void*)GetExitCodeProcess},
   {"KERNEL32.DLL", "GetStartupInfoA",     (void*)GetStartupInfoA},
   {"KERNEL32.DLL", "GetCommandLineA",     (void*)GetCommandLineA},
   {"KERNEL32.DLL", "CreateProcessA",      (void*)CreateProcessA},
+
+  /* threading */
+  {"KERNEL32.DLL", "CreateThread",        (void*)CreateThread},
+  {"KERNEL32.DLL", "ExitThread",          (void*)ExitThread},
+  {"KERNEL32.DLL", "Sleep",               (void*)Sleep},
+  {"KERNEL32.DLL", "GetCurrentThreadId",  (void*)GetCurrentThreadId},
+
+  /* TLS */
+  {"KERNEL32.DLL", "TlsAlloc",            (void*)TlsAlloc},
+  {"KERNEL32.DLL", "TlsFree",             (void*)TlsFree},
+  {"KERNEL32.DLL", "TlsGetValue",         (void*)TlsGetValue},
+  {"KERNEL32.DLL", "TlsSetValue",         (void*)TlsSetValue},
+
   {NULL, NULL, NULL}
 };
