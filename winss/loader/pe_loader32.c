@@ -4,23 +4,19 @@
 //   then transfers control to the image entrypoint.
 // - Integrates with NT shim for TEB/TLS setup and GetCommandLineA.
 //
-// NOTE:
+// IMPORTANT:
 // * Do NOT implement pe32_spawn() here. That symbol is provided by the bridge
 //   (compiled into libntshim32). Keeping it out avoids multiple-definition link errors.
-// * This file expects the following headers to exist in the repo:
-//     ../ntshim32/ntshim_api.h   (nt_set_command_lineA, nt_teb_setup_for_current or similar)
-//     ../include/win/minwin.h    (Win32 basic typedefs)
-//     ../include/nt/hooks.h      (extern struct Hook NT_HOOKS[] with kernel32 shims)
 
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>   // getenv, malloc, free
-#include <string.h>   // memcpy, memset, strcmp, strcasecmp (if available)
+#include <string.h>   // memcpy, memset, strcat, strlen, strcmp
 #include <sys/mman.h> // mmap, PROT_*
-#include <unistd.h>   // getpagesize
-#include "../ntshim32/ntshim_api.h"
-#include "../include/win/minwin.h"
-#include "../include/nt/hooks.h"
+#include <unistd.h>   // sysconf
+#include "../ntshim32/ntshim_api.h"      // nt_set_command_lineA(...), nt_teb_setup_for_current(...)
+#include "../include/win/minwin.h"       // basic Win32 typedefs
+#include "../include/nt/hooks.h"         // struct Hook, extern NT_HOOKS[]
 
 // ---------- logging ----------
 static int is_log(void) {
@@ -34,7 +30,7 @@ static int is_log(void) {
 }
 #define LOGF(...) do{ if(is_log()){ fprintf(stderr,"[pe_loader32] " __VA_ARGS__); fputc('\n',stderr);} }while(0)
 
-// ---------- local helpers ----------
+// ---------- small helpers ----------
 static size_t pagesz(void){ long p = sysconf(_SC_PAGESIZE); return (p>0)?(size_t)p:4096; }
 static size_t round_up(size_t x, size_t a){ size_t m=a-1; return (x+a-1)&~m; }
 
@@ -169,8 +165,8 @@ typedef struct {
 #pragma pack(pop)
 
 // ---------- hook table ----------
-struct Hook { const char* dll; const char* name; void* fn; };
-extern struct Hook NT_HOOKS[]; // declared in ../include/nt/hooks.h
+/* struct Hook 與 NT_HOOKS[] 的宣告已在 ../include/nt/hooks.h 中給出 */
+extern struct Hook NT_HOOKS[];
 
 static void* find_hook(const char* dll, const char* name){
   if(!dll || !name) return NULL;
@@ -260,7 +256,6 @@ static int map_pe32_image(const char* path, PE_IMAGE* out){
   out->reloc_rva  = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress;
   out->reloc_size = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size;
 
-  // log basic map info
   LOGF("mapped '%s': pref=0x%08x map=%p delta=%d (%p)",
       path, image_base, map, (int)((intptr_t)map - (intptr_t)image_base),
       (void*)((uintptr_t)map - (uintptr_t)image_base));
@@ -307,14 +302,12 @@ static int bind_imports(PE_IMAGE* img){
   uint8_t* base = img->map;
   IMAGE_IMPORT_DESCRIPTOR* imp = (IMAGE_IMPORT_DESCRIPTOR*)(base + img->import_rva);
 
-  // count modules
   LOGF("bind: KERNEL32.DLL");
 
   for (; imp->Name; ++imp){
     const char* dll = (const char*)(base + imp->Name);
     if (!dll || !*dll) continue;
 
-    // choose name thunk table
     uint32_t oft_rva = imp->u1.OriginalFirstThunk ? imp->u1.OriginalFirstThunk : imp->FirstThunk;
     uint32_t ft_rva  = imp->FirstThunk;
     if (!ft_rva) continue;
@@ -336,18 +329,11 @@ static int bind_imports(PE_IMAGE* img){
         if (str_ieq(dll, "KERNEL32.DLL")){
           addr = find_hook("KERNEL32.DLL", name);
           if (is_log()){
-            if (addr) {
-              LOGF("    %-20s -> %p", name, addr);
-            } else {
-              LOGF("    %-20s -> (nil)", name);
-            }
+            if (addr) LOGF("    %-20s -> %p", name, addr);
+            else      LOGF("    %-20s -> (nil)", name);
           }
         } else {
-          // other DLLs not supported yet
-          addr = NULL;
-          if (is_log()){
-            LOGF("Unresolved import: %s!%s", dll, name);
-          }
+          if (is_log()) LOGF("Unresolved import: %s!%s", dll, name);
         }
       }
 
@@ -369,18 +355,13 @@ static int run_mapped_pe32(const char* path, PE_IMAGE* img){
 
   LOGF("entering entrypoint 0x%08x for %s", entry_rva, path);
 
-  // 初始化當前執行緒的 TEB/TLS（如果你的 ntshim_api.h 有這個介面）。
-  // 這裡我們不打印 selector/base，避免對內部實作做假設。
-  // （若你需要日誌，可在 ntshim 的實作內自行列印）
-  #if defined(nt_teb_setup_for_current) || defined(HAVE_NT_TEB_SETUP_FOR_CURRENT)
+  // Initialize current thread TEB/TLS if your shim provides it.
+  // (Safe to keep; no-ops if the function is a stub.)
   nt_teb_setup_for_current();
-  #endif
 
-  // Entrypoint 約定：多數 Win32 console 程式會自行呼叫 ExitProcess。
-  // 這裡以 "void (*) (void)" 直接跳入；若它返回，我們就回傳 0。
   typedef void (*entry_fn_t)(void);
   entry_fn_t ep = (entry_fn_t)(uintptr_t)entry;
-  ep();
+  ep();  // typical console programs will call ExitProcess; if it returns, we return 0.
   return 0;
 }
 
@@ -388,7 +369,6 @@ static int run_pe32(const char* path){
   PE_IMAGE img;
   if (!map_pe32_image(path, &img)) return 1;
   int rc = run_mapped_pe32(path, &img);
-  // 讓被載入的程式自行 ExitProcess；若它返回，我們釋放映像。
   if (img.map && img.map_size) munmap(img.map, img.map_size);
   return rc;
 }
@@ -402,8 +382,7 @@ int main(int argc, char** argv){
 
   const char* path = argv[1];
   char* args = join_args(argc-2, &argv[2]);
-  // 設定給 Win32 GetCommandLineA 的視圖（由 ntshim32 提供）
-  nt_set_command_lineA(path, args);
+  nt_set_command_lineA(path, args); // provide to GetCommandLineA via shim
   if (args) free(args);
 
   return run_pe32(path);
