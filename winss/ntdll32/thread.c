@@ -7,6 +7,9 @@
 #include "../include/nt/ntdef.h"
 #include "../include/win/minwin.h"
 
+DWORD WINAPI GetLastError(void);
+void  WINAPI SetLastError(DWORD e);
+
 #define MAGIC_THR 0x54485244u /* 'THRD' */
 
 typedef struct ThreadObj {

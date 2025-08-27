@@ -3,6 +3,9 @@
 #include "../include/nt/ntdef.h"
 #include "../include/win/minwin.h"
 
+DWORD WINAPI GetLastError(void);
+void  WINAPI SetLastError(DWORD e);
+
 /* 動態 TLS 槽：先給 64 個 */
 #define TLS_SLOTS 64
 static unsigned long g_tls_bitmap = 0; /* 每位代表一個 slot 是否被 alloc */

@@ -11,6 +11,7 @@
 # endif
 #endif
 
+
 /* --- 基本 Windows 風格型別 --- */
 typedef uint32_t DWORD;
 typedef int32_t  BOOL;
@@ -140,7 +141,8 @@ HANDLE WINAPI CreateThread(LPVOID, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD
 void   WINAPI ExitThread(DWORD);
 DWORD  WINAPI GetCurrentThreadId(void);
 void   WINAPI Sleep(DWORD);
-
+DWORD  WINAPI GetLastError(void);
+void   WINAPI SetLastError(DWORD e);
 DWORD  WINAPI TlsAlloc(void);
 BOOL   WINAPI TlsFree(DWORD);
 BOOL   WINAPI TlsSetValue(DWORD, LPVOID);
