@@ -1,14 +1,15 @@
-// winss/ntshim32/ntshim32.c
-// KERNEL32 32-bit minimal shim for AwA-OS / WinSS
-#include <unistd.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdint.h>
-#include <errno.h>
-#include <stdio.h>
+// winss/ntdll32/thread.c
+// Minimal thread API for AwA-OS (i386) using pthreads
+// 修正：以「handle 註冊表」避免對假 handle 解參考造成 SIGSEGV。
 
-#include "../include/win/minwin.h"
-#include "../include/nt/hooks.h"   // struct Hook
+#include <pthread.h>
+#include <unistd.h>
+#include <sys/syscall.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+
+#include "../include/win/minwin.h"   // DWORD, HANDLE, LPVOID, etc.
 
 #ifndef WINAPI
 #  if defined(__i386__) || defined(__i386) || defined(i386)
@@ -29,183 +30,150 @@ typedef void VOID;
 #define WAIT_OBJECT_0 0x00000000u
 #endif
 
-static int _log_enabled = 0;
-#define LOGF(...) do{ if(_log_enabled){ fprintf(stderr,"[ntshim32] " __VA_ARGS__); fputc('\n',stderr);} }while(0)
+/* -------- 內部執行緒表示 -------- */
+typedef struct AWA_THREAD {
+  pthread_t th;
+  DWORD     tid;
+  DWORD     exit_code;
+  int       joined;
+  int       magic;
+  struct AWA_THREAD* _next; /* for registry */
+} AWA_THREAD;
 
-/* 有些 thread 幫手由 ntdll32/thread.c 提供（弱符號，缺席也能鏈結） */
-__attribute__((weak)) int   _nt_is_thread_handle(HANDLE h);
-__attribute__((weak)) BOOL  _nt_close_thread(HANDLE h);
-__attribute__((weak)) DWORD _nt_wait_thread(HANDLE h, DWORD ms);
-__attribute__((weak)) BOOL  _nt_get_thread_exit_code(HANDLE h, LPDWORD code);
+#define AWA_T_MAGIC 0x41574154 /* 'AWAT' */
 
-/* TLS / Thread API 來自 ntdll32/（這裡宣告原型供 NT_HOOKS 取址） */
-extern DWORD WINAPI TlsAlloc(void);
-extern BOOL  WINAPI TlsFree(DWORD idx);
-extern LPVOID WINAPI TlsGetValue(DWORD idx);
-extern BOOL  WINAPI TlsSetValue(DWORD idx, LPVOID val);
+/* 簡單的 handle 註冊表（單向串列 + 互斥） */
+static pthread_mutex_t g_thr_mu = PTHREAD_MUTEX_INITIALIZER;
+static AWA_THREAD*     g_thr_head = NULL;
 
-extern HANDLE WINAPI CreateThread(LPVOID sa, SIZE_T stack,
-  LPTHREAD_START_ROUTINE start, LPVOID param, DWORD flags, LPDWORD tid);
-extern VOID   WINAPI ExitThread(DWORD code);
-extern VOID   WINAPI Sleep(DWORD ms);
-extern DWORD  WINAPI GetCurrentThreadId(void);
-
-/* ---- 命令列儲存區（供 GetCommandLineA） ---- */
-static char g_cmdlineA[1024] = {0};
-
-__attribute__((visibility("default")))
-void nt_set_command_lineA(const char* s) {
-  if (!s) { g_cmdlineA[0] = 0; return; }
-  size_t n = strlen(s);
-  if (n >= sizeof(g_cmdlineA)) n = sizeof(g_cmdlineA)-1;
-  memcpy(g_cmdlineA, s, n);
-  g_cmdlineA[n] = 0;
+static void reg_add(AWA_THREAD* ht){
+  pthread_mutex_lock(&g_thr_mu);
+  ht->_next = g_thr_head;
+  g_thr_head = ht;
+  pthread_mutex_unlock(&g_thr_mu);
+}
+static void reg_del(AWA_THREAD* ht){
+  pthread_mutex_lock(&g_thr_mu);
+  AWA_THREAD **pp=&g_thr_head, *p=g_thr_head;
+  while (p){
+    if (p == ht){ *pp = p->_next; break; }
+    pp = &p->_next; p = p->_next;
+  }
+  pthread_mutex_unlock(&g_thr_mu);
+}
+static int reg_has(AWA_THREAD* ht){
+  int found = 0;
+  pthread_mutex_lock(&g_thr_mu);
+  for (AWA_THREAD* p=g_thr_head; p; p=p->_next){
+    if (p == ht){ found = 1; break; }
+  }
+  pthread_mutex_unlock(&g_thr_mu);
+  return found;
 }
 
-/* ---- 句柄映射 ---- */
-static int map_handle(HANDLE h) {
-  DWORD key = (DWORD)(uintptr_t)h;
-  if (key == (DWORD)-10) return 0; // STD_INPUT_HANDLE
-  if (key == (DWORD)-11) return 1; // STD_OUTPUT_HANDLE
-  if (key == (DWORD)-12) return 2; // STD_ERROR_HANDLE
-  return -1;
+/* 產生一個 32-bit thread id（Linux: gettid；否則以 pthread_self 雜湊退化） */
+static DWORD gen_tid(void){
+#ifdef SYS_gettid
+  return (DWORD)syscall(SYS_gettid);
+#else
+  uintptr_t v = (uintptr_t)pthread_self();
+  return (DWORD)((v ^ (v>>16)) & 0xFFFFFFFFu);
+#endif
 }
 
-/* ---- KERNEL32 exports：I/O ---- */
-HANDLE WINAPI GetStdHandle(DWORD nStdHandle) {
-  if (getenv("AWAOS_LOG")) _log_enabled = 1;
-  return (HANDLE)(uintptr_t)nStdHandle;
+/* CreateThread 的啟動上下文 */
+typedef struct START_CTX {
+  LPTHREAD_START_ROUTINE start;
+  LPVOID                 param;
+  AWA_THREAD*            ht;
+} START_CTX;
+
+/* pthread 進入點，呼叫 Win32 風格的 LPTHREAD_START_ROUTINE */
+static void* trampoline(void* p){
+  START_CTX* ctx = (START_CTX*)p;
+  DWORD code = 0;
+  if (ctx && ctx->start) code = ctx->start(ctx->param);
+  if (ctx && ctx->ht)    ctx->ht->exit_code = code;
+  if (ctx) free(ctx);
+  return (void*)(uintptr_t)code;
 }
 
-BOOL WINAPI WriteFile(HANDLE h, const void* buf, DWORD len, LPDWORD written, LPVOID ovl) {
-  (void)ovl;
-  if (!_log_enabled && getenv("AWAOS_LOG")) _log_enabled = 1;
-  if (written) *written = 0;
+/* -------- Win32 風格介面（KERNEL32 對應）-------- */
+/* 參考：CreateThread/ExitThread/Sleep/GetCurrentThreadId 官方文件。 */
+// CreateThread: https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-createthread
+HANDLE WINAPI CreateThread(
+  LPVOID /*lpThreadAttributes*/, SIZE_T /*dwStackSize*/,
+  LPTHREAD_START_ROUTINE lpStartAddress, LPVOID lpParameter,
+  DWORD /*dwCreationFlags*/, LPDWORD lpThreadId)
+{
+  AWA_THREAD* ht = (AWA_THREAD*)calloc(1, sizeof(AWA_THREAD));
+  if (!ht){ SetLastError(8 /*ERROR_NOT_ENOUGH_MEMORY*/); return NULL; }
+  ht->magic = AWA_T_MAGIC;
+  ht->tid   = gen_tid();
 
-  int fd = map_handle(h);
-  if (fd < 0) { SetLastError(6 /*ERROR_INVALID_HANDLE*/); return FALSE; }
+  if (lpThreadId) *lpThreadId = ht->tid;
 
-  ssize_t n = write(fd, buf, (size_t)len);
-  if (_log_enabled) LOGF("WriteFile fd=%d want=%u got=%zd", fd, (unsigned)len, n);
-  if (n < 0) return FALSE;
-  if (written) *written = (DWORD)n;
+  START_CTX* ctx = (START_CTX*)calloc(1, sizeof(START_CTX));
+  if (!ctx){ free(ht); SetLastError(8); return NULL; }
+  ctx->start = lpStartAddress;
+  ctx->param = lpParameter;
+  ctx->ht    = ht;
+
+  int rc = pthread_create(&ht->th, NULL, trampoline, ctx);
+  if (rc != 0){ free(ctx); free(ht); SetLastError(8); return NULL; }
+
+  reg_add(ht);
+  return (HANDLE)ht;
+}
+
+// ExitThread: https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-exitthread
+VOID WINAPI ExitThread(DWORD dwExitCode){
+  pthread_exit((void*)(uintptr_t)dwExitCode);
+}
+
+// Sleep: https://learn.microsoft.com/windows/win32/api/synchapi/nf-synchapi-sleep
+VOID WINAPI Sleep(DWORD dwMilliseconds){
+  usleep((useconds_t)dwMilliseconds * 1000u);
+}
+
+// GetCurrentThreadId: https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-getcurrentthreadid
+DWORD WINAPI GetCurrentThreadId(void){
+  return gen_tid();
+}
+
+/* -------- 提供給 ntshim32 的輔助（避免解參考隨機指標）-------- */
+int _nt_is_thread_handle(HANDLE h){
+  /* 只用「是否在註冊表」判斷，不解參考 h 指向內容 */
+  AWA_THREAD* ht = (AWA_THREAD*)h;
+  return reg_has(ht);
+}
+
+BOOL _nt_close_thread(HANDLE h){
+  AWA_THREAD* ht = (AWA_THREAD*)h;
+  if (!reg_has(ht)) return TRUE;  /* 不是 thread handle：按 Windows 慣例，這裡可視作成功或失敗，PoC 採成功 */
+  reg_del(ht);
+  free(ht);
   return TRUE;
 }
 
-BOOL WINAPI ReadFile(HANDLE h, LPVOID buf, DWORD toRead, LPDWORD out, LPVOID overlapped) {
-  (void)overlapped;
-  if (!_log_enabled && getenv("AWAOS_LOG")) _log_enabled = 1;
-  if (out) *out = 0;
+// WaitForSingleObject: https://learn.microsoft.com/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject
+DWORD _nt_wait_thread(HANDLE h, DWORD dwMilliseconds){
+  AWA_THREAD* ht = (AWA_THREAD*)h;
+  if (!reg_has(ht)) return WAIT_OBJECT_0; /* 非 thread handle：直接視為已 signaled */
 
-  int fd = map_handle(h);
-  if (fd < 0) { SetLastError(6 /*ERROR_INVALID_HANDLE*/); return FALSE; }
-  if (toRead == 0) return TRUE;
-
-  ssize_t n = read(fd, buf, (size_t)toRead);
-  if (_log_enabled) {
-    int c = (n>0)? ((unsigned char*)buf)[0] : -1;
-    LOGF("ReadFile fd=%d want=%u got=%zd first=0x%02x", fd, (unsigned)toRead, n, (unsigned)(c&0xff));
-  }
-  if (n < 0) return FALSE;
-  if (out) *out = (DWORD)n;
-  return TRUE;
-}
-
-__attribute__((noreturn)) void WINAPI ExitProcess(UINT code) {
-  _exit((int)code);
-}
-
-/* ---- KERNEL32 exports：handles/wait/exitcode ---- */
-BOOL WINAPI CloseHandle(HANDLE h) {
-  int fd = map_handle(h);
-  if (fd >= 0) return TRUE;
-  if (_nt_is_thread_handle && _nt_is_thread_handle(h)) {
-    if (_nt_close_thread) return _nt_close_thread(h);
-    return TRUE;
-  }
-  return TRUE;
-}
-
-DWORD WINAPI WaitForSingleObject(HANDLE h, DWORD ms) {
-  if (_nt_is_thread_handle && _nt_is_thread_handle(h)) {
-    if (_nt_wait_thread) return _nt_wait_thread(h, ms);
-    return WAIT_OBJECT_0;
-  }
-  (void)ms;
+#if defined(__GLIBC__) && defined(_GNU_SOURCE)
+  /* PoC 不處理逾時：可用 pthread_timedjoin_np 改進 */
+  (void)dwMilliseconds;
+#endif
+  pthread_join(ht->th, NULL);
+  ht->joined = 1;
   return WAIT_OBJECT_0;
 }
 
-BOOL WINAPI GetExitCodeProcess(HANDLE h, LPDWORD code) {
-  if (!code) return FALSE;
-  *code = 0;
-  if (_nt_is_thread_handle && _nt_is_thread_handle(h)) {
-    if (_nt_get_thread_exit_code) return _nt_get_thread_exit_code(h, code);
-    *code = 0;
-    return TRUE;
-  }
-  *code = 0;
+BOOL _nt_get_thread_exit_code(HANDLE h, LPDWORD lpExitCode){
+  if (!lpExitCode) return FALSE;
+  AWA_THREAD* ht = (AWA_THREAD*)h;
+  if (!reg_has(ht)){ *lpExitCode = 0; return TRUE; }
+  *lpExitCode = ht->exit_code;
   return TRUE;
 }
-
-VOID WINAPI GetStartupInfoA(STARTUPINFOA* psi) {
-  if (!psi) return;
-  memset(psi, 0, sizeof(*psi));
-  psi->cb = sizeof(*psi);
-  psi->dwFlags = 0;
-  psi->hStdInput  = (HANDLE)(uintptr_t)STD_INPUT_HANDLE;
-  psi->hStdOutput = (HANDLE)(uintptr_t)STD_OUTPUT_HANDLE;
-  psi->hStdError  = (HANDLE)(uintptr_t)STD_ERROR_HANDLE;
-}
-
-/* 與現行 minwin.h 宣告一致（LPCSTR） */
-LPCSTR WINAPI GetCommandLineA(void) { return g_cmdlineA; }
-
-/* 測試用 stub：回傳成功（不真正啟動子行程） */
-BOOL WINAPI CreateProcessA(
-  LPCSTR app, LPSTR cmdline,
-  LPVOID psa, LPVOID tsa, BOOL inherit, DWORD flags,
-  LPVOID env, LPCSTR cwd, STARTUPINFOA* si, PROCESS_INFORMATION* pi)
-{
-  (void)psa; (void)tsa; (void)inherit; (void)flags; (void)env; (void)cwd; (void)si;
-  if (getenv("AWAOS_LOG")) _log_enabled = 1;
-  if (!pi) { SetLastError(87 /*ERROR_INVALID_PARAMETER*/); return FALSE; }
-  LOGF("CreateProcessA app='%s' cmdline='%s'", app?app:"(null)", cmdline?cmdline:"(null)");
-  memset(pi, 0, sizeof(*pi));
-  pi->hProcess   = (HANDLE)(uintptr_t)0x1001;
-  pi->hThread    = (HANDLE)(uintptr_t)0x1001;
-  pi->dwProcessId= 1;
-  pi->dwThreadId = 1;
-  return TRUE;
-}
-
-/* ---- 匯出表：補上 Thread/TLS API ---- */
-__attribute__((visibility("default")))
-struct Hook NT_HOOKS[] = {
-  /* I/O */
-  {"KERNEL32.DLL", "GetStdHandle",        (void*)GetStdHandle},
-  {"KERNEL32.DLL", "WriteFile",           (void*)WriteFile},
-  {"KERNEL32.DLL", "ReadFile",            (void*)ReadFile},
-  {"KERNEL32.DLL", "ExitProcess",         (void*)ExitProcess},
-
-  /* handles/wait/exit */
-  {"KERNEL32.DLL", "CloseHandle",         (void*)CloseHandle},
-  {"KERNEL32.DLL", "WaitForSingleObject", (void*)WaitForSingleObject},
-  {"KERNEL32.DLL", "GetExitCodeProcess",  (void*)GetExitCodeProcess},
-  {"KERNEL32.DLL", "GetStartupInfoA",     (void*)GetStartupInfoA},
-  {"KERNEL32.DLL", "GetCommandLineA",     (void*)GetCommandLineA},
-  {"KERNEL32.DLL", "CreateProcessA",      (void*)CreateProcessA},
-
-  /* threading */
-  {"KERNEL32.DLL", "CreateThread",        (void*)CreateThread},
-  {"KERNEL32.DLL", "ExitThread",          (void*)ExitThread},
-  {"KERNEL32.DLL", "Sleep",               (void*)Sleep},
-  {"KERNEL32.DLL", "GetCurrentThreadId",  (void*)GetCurrentThreadId},
-
-  /* TLS */
-  {"KERNEL32.DLL", "TlsAlloc",            (void*)TlsAlloc},
-  {"KERNEL32.DLL", "TlsFree",             (void*)TlsFree},
-  {"KERNEL32.DLL", "TlsGetValue",         (void*)TlsGetValue},
-  {"KERNEL32.DLL", "TlsSetValue",         (void*)TlsSetValue},
-
-  {NULL, NULL, NULL}
-};
