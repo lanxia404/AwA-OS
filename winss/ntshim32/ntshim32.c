@@ -15,7 +15,7 @@ int   _nt_wait_thread(HANDLE h, DWORD ms);
 DWORD _nt_get_thread_exit_code(HANDLE h);
 BOOL  _nt_close_thread(HANDLE h);
 
-/* --- 基礎工具 --- */
+/* --- 工具 --- */
 static void ms_sleep(unsigned ms){
   struct timespec ts;
   ts.tv_sec = ms / 1000;
@@ -28,11 +28,11 @@ static int map_handle(DWORD h) {
   if (h == (DWORD)-10) return 0;   /* STD_INPUT_HANDLE  */
   if (h == (DWORD)-11) return 1;   /* STD_OUTPUT_HANDLE */
   if (h == (DWORD)-12) return 2;   /* STD_ERROR_HANDLE  */
-  if (h <= 2u) return (int)h;      /* 容忍直接傳入 0/1/2 */
+  if (h <= 2u) return (int)h;      /* 容忍直接傳 0/1/2 */
   return -1;
 }
 
-/* ---- KERNEL32 基礎 I/O ---- */
+/* ---- KERNEL32 I/O ---- */
 HANDLE WINAPI GetStdHandle(DWORD nStdHandle) {
   return (HANDLE)(uintptr_t)nStdHandle;
 }
@@ -61,7 +61,7 @@ __attribute__((noreturn)) void WINAPI ExitProcess(UINT code) {
   _exit((int)code);
 }
 
-/* ---- ASCII/UTF16 命令列緩衝 ---- */
+/* ---- 命令列 ---- */
 static char  g_cmdlineA[512] = "AwAProcess";
 static WCHAR g_cmdlineW[512] = { 'A','w','A','P','r','o','c','e','s','s',0 };
 
@@ -244,6 +244,7 @@ struct Hook NT_HOOKS[] = {
   {"KERNEL32.DLL","CloseHandle",         (void*)CloseHandle},
   {"KERNEL32.DLL","GetCommandLineA",     (void*)GetCommandLineA},
   {"KERNEL32.DLL","GetCommandLineW",     (void*)GetCommandLineW},
+  /* Threads & TLS */
   {"KERNEL32.DLL","CreateThread",        (void*)CreateThread},
   {"KERNEL32.DLL","ExitThread",          (void*)ExitThread},
   {"KERNEL32.DLL","Sleep",               (void*)Sleep},
