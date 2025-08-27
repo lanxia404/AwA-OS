@@ -23,10 +23,12 @@ static void ms_sleep(unsigned ms){
   nanosleep(&ts, NULL);
 }
 
+/* 映射 Windows 標準句柄 → Linux fd；並容忍直接給 0/1/2 的情況 */
 static int map_handle(DWORD h) {
-  if (h == (DWORD)-10) return 0;
-  if (h == (DWORD)-11) return 1;
-  if (h == (DWORD)-12) return 2;
+  if (h == (DWORD)-10) return 0;   /* STD_INPUT_HANDLE  */
+  if (h == (DWORD)-11) return 1;   /* STD_OUTPUT_HANDLE */
+  if (h == (DWORD)-12) return 2;   /* STD_ERROR_HANDLE  */
+  if (h <= 2u) return (int)h;      /* 容忍直接傳入 0/1/2 */
   return -1;
 }
 
