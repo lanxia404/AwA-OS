@@ -5,8 +5,8 @@
 extern "C" {
 #endif
 
-/* 將命令列（ANSI）寫入「模擬的」K32 GetCommandLineA */
 void nt_set_command_lineA(const char* path, const char* argv /*可為 NULL*/);
+void nt_teb_setup_for_current(void);
 
 /* 由 loader 在進入 PE 前初始化當前執行緒的 TEB/TLS 最小狀態 */
 void nt_teb_setup_for_current(void);
