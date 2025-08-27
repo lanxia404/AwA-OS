@@ -1,4 +1,4 @@
-// winss/loader/pe_loader32.c — PE32 loader (imports + reloc) + init TEB + set command line + trace/fallback
+// winss/loader/pe_loader32.c — PE32 loader (imports + reloc) + init TEB + set command line
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdint.h>
@@ -20,9 +20,6 @@ __attribute__((weak)) void nt_set_command_lineA(const char* s);
 #define MAP_FIXED_NOREPLACE 0x100000
 #endif
 
-static int g_trace = 0; /* 由環境變數 AWAOS_TRACE 控制 */
-
-/* -------- PE structures -------- */
 #pragma pack(push,1)
 typedef struct {
   uint16_t e_magic;      uint16_t e_cblp;       uint16_t e_cp;         uint16_t e_crlc;
@@ -97,7 +94,6 @@ extern struct Hook NT_HOOKS[];
 static void die(const char* s){ perror(s); _exit(127); }
 static void* rva(void* base, uint32_t off){ return off ? (uint8_t*)base + off : NULL; }
 
-/* -------- name helpers -------- */
 static int ieq(const char* a, const char* b){
   for (; *a && *b; ++a,++b){
     int ca=tolower((unsigned char)*a), cb=tolower((unsigned char)*b);
@@ -121,7 +117,7 @@ static void undecorate(const char* in, char* out, size_t cap){
   out[j]=0;
 }
 
-/* 規範化 DLL 名：轉小寫 + 去 ".dll" 後綴 */
+/* 規範化 DLL 名：轉小寫 + 去掉尾端 ".dll"（若有） */
 static void canon_dll(const char* in, char* out, size_t cap){
   size_t j=0;
   for (size_t i=0; in && in[i] && j+1<cap; ++i){
@@ -131,62 +127,30 @@ static void canon_dll(const char* in, char* out, size_t cap){
   }
   out[j]=0;
   size_t L = strlen(out);
-  if (L>=4 && out[L-4]=='.' && out[L-3]=='l' && out[L-2]=='l' && out[L-1]=='d'){
-    /* unlikely path (".lld")，留著保險 */
-  }
   if (L>=4 && out[L-4]=='.' && out[L-3]=='d' && out[L-2]=='l' && out[L-1]=='l'){
-    out[L-4]=0;
+    out[L-4]=0; /* strip ".dll" */
   }
 }
 
-/* 診斷輸出（避免使用 stdio 的緩衝，直接 write 到 stderr） */
-static void tracef(const char* a, const char* b){
-  if (!g_trace) return;
-  char buf[256]; size_t i=0;
-  #define APPEND(S) do{ const char* _s=(S); while(_s&&*_s&&i+1<sizeof(buf)) buf[i++]=*_s++; }while(0)
-  APPEND("[IAT] "); APPEND(a); APPEND(b? " -> ":""); if (b) APPEND(b); APPEND("\n");
-  buf[i]=0;
-  write(2, buf, i);
-  #undef APPEND
-}
-
-/* 回退 stub：若真的解析不到，把 IAT 指到這裡，印出訊息後結束 */
-static void WINAPI import_fallback_stub(void){
-  const char msg[] = "AwA-OS loader: called unresolved import; terminating.\n";
-  write(2, msg, sizeof(msg)-1);
-  ExitProcess(193);
-}
-
-/* 更魯棒的匯入解析 */
+/* 更魯棒的匯入解析：先只看函式名；不行再看 DLL+函式名 */
 static void* resolve_import(const char* dll, const char* sym){
   char clean[128]; undecorate(sym, clean, sizeof(clean));
 
   /* 1) 名稱直配（忽略 DLL） */
   for (struct Hook* h=NT_HOOKS; h && h->dll; ++h){
-    if (strcmp(h->name, clean)==0) {
-      if (g_trace) tracef(clean, h->dll);
-      return h->fn;
-    }
+    if (strcmp(h->name, clean)==0) return h->fn;
   }
 
-  /* 2) DLL + 名稱（規範化） */
+  /* 2) DLL + 名稱（兩邊 DLL 規範化後比較） */
   char want[64]; canon_dll(dll, want, sizeof(want));
   for (struct Hook* h=NT_HOOKS; h && h->dll; ++h){
     char have[64]; canon_dll(h->dll, have, sizeof(have));
-    if (strcmp(have, want)==0 && strcmp(h->name, clean)==0) {
-      if (g_trace) tracef(clean, h->dll);
-      return h->fn;
-    }
+    if (strcmp(have, want)==0 && strcmp(h->name, clean)==0) return h->fn;
   }
 
-  if (g_trace){
-    char buf[192]; snprintf(buf, sizeof(buf), "%s!%s (undecorated=%s)", dll?dll:"?", sym?sym:"?", clean);
-    tracef("UNRESOLVED ", buf);
-  }
   return NULL;
 }
 
-/* -------- mapping / reloc -------- */
 static void* map_image_at(uint32_t base, size_t sz, int try_fixed){
   int flags = MAP_PRIVATE|MAP_ANON;
   void* p;
@@ -230,7 +194,6 @@ static void apply_relocs(void* image, IMAGE_NT_HEADERS32* nt, uint32_t actual_ba
   }
 }
 
-/* -------- argv → CommandLineA -------- */
 static void set_cmdline_from_argv(int argc, char** argv){
   if (!nt_set_command_lineA) return;
   if (argc <= 1){ nt_set_command_lineA(""); return; }
@@ -244,14 +207,11 @@ static void set_cmdline_from_argv(int argc, char** argv){
 }
 
 int main(int argc, char** argv){
-  g_trace = getenv("AWAO S_TRACE") ? 1 : 0; /* 匯入追蹤（可在 CI 打開） */
-
   if (NtCurrentTeb) NtCurrentTeb();            /* 初始化 TEB（若可用） */
   set_cmdline_from_argv(argc, argv);           /* 先設命令列，便於早期使用 */
 
   if (argc < 2){
-    const char msg[] = "usage: pe_loader32 program.exe [args...]\n";
-    write(2, msg, sizeof(msg)-1);
+    fprintf(stderr,"usage: %s program.exe [args...]\n", argv[0]);
     return 2;
   }
   const char* path = argv[1];
@@ -266,11 +226,11 @@ int main(int argc, char** argv){
   if (file == MAP_FAILED) die("mmap exe");
 
   IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)file;
-  if (dos->e_magic != 0x5A4D){ const char m[]="Not MZ\n"; write(2,m,sizeof(m)-1); return 1; }
+  if (dos->e_magic != 0x5A4D){ fprintf(stderr,"Not MZ\n"); return 1; }
 
   IMAGE_NT_HEADERS32* nt = (IMAGE_NT_HEADERS32*)(file + dos->e_lfanew);
   if (nt->Signature != 0x4550 || nt->OptionalHeader.Magic != 0x10B){
-    const char m[]="Not PE32\n"; write(2,m,sizeof(m)-1); return 1;
+    fprintf(stderr,"Not PE32\n"); return 1;
   }
 
   uint32_t image_base  = nt->OptionalHeader.ImageBase;
@@ -293,7 +253,6 @@ int main(int argc, char** argv){
     apply_relocs(image, nt, (uint32_t)(uintptr_t)image);
   }
 
-  /* -------- imports -------- */
   IMAGE_DATA_DIRECTORY impdir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
   if (impdir.VirtualAddress && impdir.Size){
     for (IMAGE_IMPORT_DESCRIPTOR* d = (IMAGE_IMPORT_DESCRIPTOR*)((uint8_t*)image + impdir.VirtualAddress);
@@ -307,16 +266,15 @@ int main(int argc, char** argv){
 
       for (; oft && oft->u1; ++oft, ++ft){
         if (oft->u1 & IMAGE_ORDINAL_FLAG32){
-          const char m[] = "Ordinal import not supported\n";
-          write(2, m, sizeof(m)-1);
+          fprintf(stderr, "Ordinal import not supported for %s\n", dll);
           return 1;
         }else{
           IMAGE_IMPORT_BY_NAME* ibn = (IMAGE_IMPORT_BY_NAME*)((uint8_t*)image + oft->u1);
           const char* sym = (const char*)ibn->Name;
           void* fn = resolve_import(dll, sym);
           if (!fn){
-            /* 使用 fallback，避免 segfault，並讓 CI 看得見哪個符號缺 */
-            fn = (void*)import_fallback_stub;
+            fprintf(stderr, "Unresolved import %s!%s\n", dll, sym);
+            return 1;
           }
           ft->u1 = (uint32_t)(uintptr_t)fn;
         }
@@ -324,9 +282,8 @@ int main(int argc, char** argv){
     }
   }
 
-  /* -------- jump to entry -------- */
   void* entry = (uint8_t*)image + nt->OptionalHeader.AddressOfEntryPoint;
-  if (!entry){ const char m[]="No entry\n"; write(2,m,sizeof(m)-1); return 1; }
+  if (!entry){ fprintf(stderr,"No entry\n"); return 1; }
 
   typedef void (WINAPI *entry_t)(void);
   ((entry_t)entry)();
