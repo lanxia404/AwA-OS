@@ -158,8 +158,8 @@ VOID WINAPI GetStartupInfoA(STARTUPINFOA* psi) {
   psi->hStdError  = (HANDLE)(uintptr_t)STD_ERROR_HANDLE;
 }
 
-/* Also export GetCommandLineA so future apps can query it */
-LPSTR WINAPI GetCommandLineA(void) {
+/* NOTE: 為了符合你目前的 minwin.h（宣告為 LPCSTR），這裡回傳 const */
+LPCSTR WINAPI GetCommandLineA(void) {
   return g_cmdlineA;
 }
 
