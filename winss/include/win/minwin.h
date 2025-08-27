@@ -31,6 +31,8 @@ typedef const void*  LPCVOID;
 typedef char*        LPSTR;
 typedef const char*  LPCSTR;
 typedef DWORD*       LPDWORD;
+/* ★ 修補：補上 LPBYTE（Win32: typedef unsigned char BYTE, *LPBYTE;） */
+typedef BYTE*        LPBYTE;
 
 /* ---- 呼叫慣例 ---- */
 #ifndef WINAPI
@@ -79,18 +81,18 @@ typedef struct _STARTUPINFOA {
   DWORD  dwFlags;
   WORD   wShowWindow;
   WORD   cbReserved2;
-  LPBYTE lpReserved2;
+  LPBYTE lpReserved2;     /* 需要 LPBYTE 的地方 */
   HANDLE hStdInput;
   HANDLE hStdOutput;
   HANDLE hStdError;
-} STARTUPINFOA, *PSTARTUPINFOA, *LPSTARTUPINFOA;  /* ← 補齊 LPSTARTUPINFOA 別名 */
+} STARTUPINFOA, *PSTARTUPINFOA, *LPSTARTUPINFOA;
 
 typedef struct _PROCESS_INFORMATION {
   HANDLE hProcess;
   HANDLE hThread;
   DWORD  dwProcessId;
   DWORD  dwThreadId;
-} PROCESS_INFORMATION, *PPROCESS_INFORMATION, *LPPROCESS_INFORMATION; /* ← 補齊 LPPROCESS_INFORMATION */
+} PROCESS_INFORMATION, *PPROCESS_INFORMATION, *LPPROCESS_INFORMATION;
 
 /* ---- KERNEL32 API 原型（本專案最小需求） ---- */
 
@@ -119,7 +121,7 @@ BOOL    WINAPI CloseHandle(HANDLE hObject);
 VOID    WINAPI SetLastError(DWORD dwErrCode);
 DWORD   WINAPI GetLastError(void);
 
-/* threads (由 ntdll32/thread.c 提供實作，這裡只宣告) */
+/* threads（由 ntdll32/thread.c 提供實作） */
 HANDLE  WINAPI CreateThread(LPVOID lpThreadAttributes, SIZE_T dwStackSize,
                             LPTHREAD_START_ROUTINE lpStartAddress, LPVOID lpParameter,
                             DWORD dwCreationFlags, LPDWORD lpThreadId);
@@ -127,7 +129,7 @@ VOID    WINAPI ExitThread(DWORD dwExitCode);
 VOID    WINAPI Sleep(DWORD dwMilliseconds);
 DWORD   WINAPI GetCurrentThreadId(void);
 
-/* TLS (由 ntdll32/tls.c 提供實作，這裡只宣告) */
+/* TLS（由 ntdll32/tls.c 提供實作） */
 DWORD   WINAPI TlsAlloc(void);
 BOOL    WINAPI TlsFree(DWORD dwTlsIndex);
 LPVOID  WINAPI TlsGetValue(DWORD dwTlsIndex);
