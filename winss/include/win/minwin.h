@@ -11,13 +11,14 @@
 # endif
 #endif
 
-
 /* --- 基本 Windows 風格型別 --- */
 typedef uint32_t DWORD;
 typedef int32_t  BOOL;
 typedef uint16_t WORD;
 typedef unsigned char BYTE;
 typedef void*    HANDLE;
+typedef void*    HMODULE;
+typedef void*    FARPROC;
 
 #ifndef TRUE
 # define TRUE 1
@@ -41,7 +42,6 @@ typedef const void* LPCVOID;
 
 typedef char*       LPSTR;
 typedef const char* LPCSTR;
-
 typedef unsigned short WCHAR;
 typedef WCHAR*       LPWSTR;
 typedef const WCHAR* LPCWSTR;
@@ -118,7 +118,7 @@ typedef struct _PROCESS_INFORMATION {
   DWORD  dwThreadId;
 } PROCESS_INFORMATION;
 
-/* --- 常用 KERNEL32 原型（便於編譯檢查） --- */
+/* --- 常用 KERNEL32 原型 --- */
 HANDLE WINAPI GetStdHandle(DWORD nStdHandle);
 BOOL   WINAPI ReadFile(HANDLE, LPVOID, DWORD, LPDWORD, LPVOID);
 BOOL   WINAPI WriteFile(HANDLE, LPCVOID, DWORD, LPDWORD, LPVOID);
@@ -134,6 +134,10 @@ BOOL   WINAPI CloseHandle(HANDLE);
 LPCSTR  WINAPI GetCommandLineA(void);
 LPCWSTR WINAPI GetCommandLineW(void);
 
+/* 模組/符號載入（shim 會用 NT_HOOKS 回傳） */
+HMODULE WINAPI GetModuleHandleA(LPCSTR name);
+FARPROC WINAPI GetProcAddress(HMODULE h, LPCSTR name);
+
 /* --- Threads & TLS --- */
 typedef DWORD (WINAPI *LPTHREAD_START_ROUTINE)(LPVOID lpParameter);
 
@@ -141,9 +145,12 @@ HANDLE WINAPI CreateThread(LPVOID, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD
 void   WINAPI ExitThread(DWORD);
 DWORD  WINAPI GetCurrentThreadId(void);
 void   WINAPI Sleep(DWORD);
-DWORD  WINAPI GetLastError(void);
-void   WINAPI SetLastError(DWORD e);
+
 DWORD  WINAPI TlsAlloc(void);
 BOOL   WINAPI TlsFree(DWORD);
 BOOL   WINAPI TlsSetValue(DWORD, LPVOID);
 LPVOID WINAPI TlsGetValue(DWORD);
+
+/* LastError */
+DWORD WINAPI GetLastError(void);
+void  WINAPI SetLastError(DWORD e);
