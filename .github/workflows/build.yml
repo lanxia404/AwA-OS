@@ -68,10 +68,12 @@ jobs:
       - name: Smoke test hello.exe
         shell: bash
         run: |
-          export AWAOS_LOG=1
           set -euxo pipefail
-          out=$(/usr/lib/awaos/pe_loader32 ./tests/win32-hello/hello.exe || true)
-          echo "OUTPUT => [$out]"
+          export AWAOS_LOG=1
+          out=$(/usr/lib/awaos/pe_loader32 ./tests/win32-hello/hello.exe 2>&1 || true)
+          echo "RAW_OUT_START"
+          printf '%s\n' "$out"
+          echo "RAW_OUT_END"
           # 寬鬆比對關鍵字，避免訊息微調造成誤判
           grep -E "Hello|AwA-OS|AwAOS|WinSS" <<<"$out"
 
