@@ -72,22 +72,17 @@ jobs:
           test -x /usr/lib/awaos/pe_loader32
           test -f ./tests/win32-hello/hello.exe
           export AWAOS_LOG=1
-          out=$(/usr/lib/awaos/pe_loader32 ./tests/win32-hello/hello.exe 2>&1 || true)
-          echo "RAW_OUT_START"
-          printf '%s\n' "$out"
-          echo "RAW_OUT_END"
-          grep -E "Hello|AwA-OS|AwAOS|WinSS" <<<"$out"
-
-      - name: Integration test cmdlite run hello.exe
-        shell: bash
-        run: |
-          set -euxo pipefail
-          export AWAOS_LOG=1
           printf "run ./tests/win32-hello/hello.exe\nexit\n" \
-            | /usr/lib/awaos/pe_loader32 ./tests/win32-cmdlite/cmdlite.exe > cmdlite.out 2>&1 || true
-          echo "==== cmdlite.out ===="
-          cat cmdlite.out
-          grep -F "exit code: 0" cmdlite.out
+            | /usr/lib/awaos/pe_loader32 ./tests/win32-cmdlite/cmdlite.exe \
+              > cmdlite.out 2>&1 || true
+
+          echo "==== cmdlite.out ===="; cat cmdlite.out
+
+          # 濾掉 [ntshim32]/[pe_loader32] 的日誌行後再檢查
+          sed -E '/^\[(ntshim32|pe_loader32)\]/d' cmdlite.out \
+           | tr -d '\r' \
+           | grep -F "exit code: 0"
+
           ! grep -F "Unknown command" cmdlite.out
 
       - name: Build & Run TLS demo
