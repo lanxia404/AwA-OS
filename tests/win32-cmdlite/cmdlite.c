@@ -5,8 +5,7 @@
 //   -nostdlib -Wl,--entry=_main@0 -Wl,--subsystem,console -lkernel32
 #include "../../winss/include/win/minwin.h"
 
-/* ---- MinGW/ GCC 可能在含 main 的物件插入對 __main 的呼叫。
- * 在 -nostdlib 不連 CRT 時，提供一個空符號避免未定義參照。 */
+/* MinGW/GCC 可能插入對 __main 的呼叫；-nostdlib 時自行提供空符號 */
 #ifdef __GNUC__
 void __main(void) { /* no-op */ }
 #endif
@@ -17,8 +16,6 @@ void __main(void) { /* no-op */ }
 
 static DWORD s_len(const char* s){ DWORD n=0; if(!s) return 0; while(s[n]) ++n; return n; }
 static int   s_eq(const char* a, const char* b){ DWORD i=0; if(!a||!b) return 0; for(;;){ char ca=a[i], cb=b[i]; if(ca!=cb) return 0; if(!ca) return 1; ++i; } }
-static int   s_ncmp(const char* a, const char* b, DWORD n){ for(DWORD i=0;i<n;++i){ char ca=a[i], cb=b[i]; if(ca!=cb) return (unsigned char)ca - (unsigned char)cb; if(!ca) return 0; } return 0; }
-static void  s_copy(char* d, const char* s){ while((*d++=*s++)); }
 static void  s_move(char* d, const char* s, DWORD n){ if(d<s){ for(DWORD i=0;i<n;++i) d[i]=s[i]; } else if(d>s){ for(DWORD i=n;i>0;--i) d[i-1]=s[i-1]; } }
 
 static void putsA(const char* s){
@@ -57,42 +54,34 @@ static void trim(char* s){
   s[j-i]=0;
 }
 
-static char* next_token(char* s, char** token){
-  char* p=s;
-  while(*p==' '||*p=='\t') ++p;
-  if(!*p){ *token=0; return p; }
-  char* start=p; char* out=p; int quoted=0;
-  if(*p=='"'){ quoted=1; ++p; start=p; }
-  for(;;){
-    char c=*p++;
-    if(c==0) break;
-    if(quoted){
-      if(c=='"') break;
-    }else{
-      if(c==' '||c=='\t') { --p; break; }
-    }
-    *out++ = c;
-  }
-  *out=0;
-  *token = start;
-  while(*p==' '||*p=='\t') ++p;
-  return p;
-}
-
 static int cmd_echo(char* args){
   trim(args);
   putln(args);
   return 0;
 }
 
+/* 更保守的 run 參數解析：跳過空白 → 取第一段為程式路徑 → 其餘整段當 cmdline */
 static int cmd_run(char* args){
-  char* p=args; char *prog=0; p = next_token(p, &prog);
-  if(!prog || !*prog){ putln("Usage: run <exe> [args...]"); return 1; }
+  char* p=args;
+  /* 跳過前置空白 */
+  while(*p==' '||*p=='\t') ++p;
+  if(!*p){ putln("Usage: run <exe> [args...]"); return 1; }
+
+  /* 擷取程式路徑 */
+  char* prog = p;
+  while(*p && *p!=' ' && *p!='\t') ++p;
+
+  /* 分隔與擷取後續 cmdline */
+  char* cmdline = 0;
+  if(*p){ *p++ = 0; /* NUL 結束路徑 */
+    while(*p==' '||*p=='\t') ++p;
+    if(*p) cmdline = p;
+  }
 
   STARTUPINFOA si; PROCESS_INFORMATION pi;
   GetStartupInfoA(&si);
 
-  if(!CreateProcessA(prog, (*p? p: 0), 0, 0, TRUE, 0, 0, 0, &si, &pi)){
+  if(!CreateProcessA(prog, cmdline, 0, 0, TRUE, 0, 0, 0, &si, &pi)){
     putln("CreateProcess failed"); return 1;
   }
   (void)WaitForSingleObject(pi.hProcess, INFINITE);
@@ -123,15 +112,20 @@ void main(void){
     trim(line);
     if(!*line) continue;
 
-    char* rest=line; char* tok=0;
-    rest = next_token(rest, &tok);
-    if(!tok) continue;
+    /* 取第一個 token 作為命令（僅判斷，不破壞其後字串） */
+    char* p=line;
+    while(*p==' '||*p=='\t') ++p;
+    char* cmd=p;
+    while(*p && *p!=' ' && *p!='\t') ++p;
+    char saved=*p; *p=0;          /* 暫時截斷命令 */
+    char* rest = (saved? p+1 : p);/* 指向可能的參數起點 */
 
-    if(s_eq(tok,"help")){ show_help(); continue; }
-    if(s_eq(tok,"echo")){ cmd_echo(rest); continue; }
-    if(s_eq(tok,"run")) { (void)cmd_run(rest); continue; }
-    if(s_eq(tok,"exit")){ ExitProcess(0); }
+    if(s_eq(cmd,"help")){ *p=saved; show_help(); continue; }
+    if(s_eq(cmd,"echo")){ *p=saved; cmd_echo(rest); continue; }
+    if(s_eq(cmd,"run")) { *p=saved; (void)cmd_run(rest); continue; }
+    if(s_eq(cmd,"exit")){ ExitProcess(0); }
 
+    *p=saved;
     putln("Unknown command. Try 'help'");
   }
   ExitProcess(0);
