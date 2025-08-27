@@ -1,59 +1,46 @@
 #pragma once
-/* Minimal Win32 types & declarations for AwA-OS (i386) */
-
+/* Minimal Win32 type and API declarations used by AwA-OS userland shims. */
 #include <stdint.h>
 #include <stddef.h>
 
-#ifndef __i386__
-#  define WINAPI
-#else
+#ifdef __i386__
 #  define WINAPI __attribute__((stdcall))
+#else
+#  define WINAPI
 #endif
 
-/* ---- 基本型別 ---------------------------------------------------------- */
+/* ---- basic Win32-style types ---- */
+typedef void            VOID;
+typedef uint8_t         BYTE;
+typedef uint16_t        WORD;
+typedef uint32_t        DWORD;
 typedef int             BOOL;
-typedef unsigned char   BYTE;
-typedef unsigned short  WORD;
-typedef unsigned int    DWORD;
-typedef unsigned int    UINT;
-typedef long            LONG;
+typedef uint32_t        UINT;
+typedef size_t          SIZE_T;
+
+#ifndef TRUE
+#  define TRUE  1
+#  define FALSE 0
+#endif
 
 typedef void*           HANDLE;
 typedef void*           LPVOID;
 typedef const void*     LPCVOID;
+
 typedef char*           LPSTR;
 typedef const char*     LPCSTR;
+
+typedef BYTE*           LPBYTE;
 typedef DWORD*          LPDWORD;
 
-/* ---- 常數 -------------------------------------------------------------- */
-#ifndef TRUE
-# define TRUE  1
-# define FALSE 0
-#endif
-
-#define STD_INPUT_HANDLE   ((DWORD)-10)
-#define STD_OUTPUT_HANDLE  ((DWORD)-11)
-#define STD_ERROR_HANDLE   ((DWORD)-12)
-
-#define INFINITE           0xFFFFFFFFu
-#define WAIT_OBJECT_0      0x00000000u
-#define STILL_ACTIVE       259u
-
-/* ---- 結構 -------------------------------------------------------------- */
-typedef struct _PROCESS_INFORMATION {
-  HANDLE hProcess;
-  HANDLE hThread;
-  DWORD  dwProcessId;
-  DWORD  dwThreadId;
-} PROCESS_INFORMATION, *LPPROCESS_INFORMATION;
-
+/* security attributes (minimal) */
 typedef struct _SECURITY_ATTRIBUTES {
   DWORD  nLength;
   LPVOID lpSecurityDescriptor;
   BOOL   bInheritHandle;
 } SECURITY_ATTRIBUTES, *LPSECURITY_ATTRIBUTES;
 
-/* 只保留我們用得到的欄位（與 Win32 對齊足夠即可） */
+/* STARTUPINFOA (fields as per docs; only A-variant needed here) */
 typedef struct _STARTUPINFOA {
   DWORD  cb;
   LPSTR  lpReserved;
@@ -75,20 +62,22 @@ typedef struct _STARTUPINFOA {
   HANDLE hStdError;
 } STARTUPINFOA, *LPSTARTUPINFOA;
 
-/* ---- 函式原型（由 ntshim32 提供實作） ---------------------------------- */
-#ifdef __cplusplus
-extern "C" {
-#endif
+/* PROCESS_INFORMATION */
+typedef struct _PROCESS_INFORMATION {
+  HANDLE hProcess;
+  HANDLE hThread;
+  DWORD  dwProcessId;
+  DWORD  dwThreadId;
+} PROCESS_INFORMATION, *LPPROCESS_INFORMATION;
 
-HANDLE  WINAPI GetStdHandle(DWORD nStdHandle);
-BOOL    WINAPI ReadFile(HANDLE h, LPVOID buf, DWORD len, LPDWORD rd, LPVOID ovlp);
-BOOL    WINAPI WriteFile(HANDLE h, LPCVOID buf, DWORD len, LPDWORD wr, LPVOID ovlp);
-VOID    WINAPI ExitProcess(UINT code);
+/* thread start prototype */
+typedef DWORD (WINAPI *LPTHREAD_START_ROUTINE)(LPVOID);
 
-VOID    WINAPI GetStartupInfoA(LPSTARTUPINFOA psi);
-LPCSTR  WINAPI GetCommandLineA(void);
-
-BOOL    WINAPI CreateProcessA(
+/* ---- KERNEL32 subset we shim ---- */
+/* process / startup */
+VOID   WINAPI ExitProcess(UINT code);
+VOID   WINAPI GetStartupInfoA(LPSTARTUPINFOA psi);
+BOOL   WINAPI CreateProcessA(
   LPCSTR lpApplicationName,
   LPSTR  lpCommandLine,
   LPSECURITY_ATTRIBUTES lpProcessAttributes,
@@ -100,19 +89,36 @@ BOOL    WINAPI CreateProcessA(
   LPSTARTUPINFOA lpStartupInfo,
   LPPROCESS_INFORMATION lpProcessInformation);
 
-DWORD   WINAPI WaitForSingleObject(HANDLE h, DWORD ms);
-BOOL    WINAPI GetExitCodeProcess(HANDLE h, LPDWORD code);
-BOOL    WINAPI CloseHandle(HANDLE h);
+/* threads & timing */
+HANDLE WINAPI CreateThread(
+  LPSECURITY_ATTRIBUTES lpThreadAttributes,
+  SIZE_T                dwStackSize,
+  LPTHREAD_START_ROUTINE lpStartAddress,
+  LPVOID                lpParameter,
+  DWORD                 dwCreationFlags,
+  LPDWORD               lpThreadId);
 
-VOID    WINAPI SetLastError(DWORD e);
-DWORD   WINAPI GetLastError(void);
+VOID   WINAPI ExitThread(DWORD dwExitCode);
+VOID   WINAPI Sleep(DWORD dwMilliseconds);
 
-/* TLS（在 ntdll32/tls.c 裡有最小實作） */
-DWORD   WINAPI TlsAlloc(void);
-BOOL    WINAPI TlsFree(DWORD idx);
-LPVOID  WINAPI TlsGetValue(DWORD idx);
-BOOL    WINAPI TlsSetValue(DWORD idx, LPVOID val);
+/* io */
+BOOL   WINAPI ReadFile (HANDLE h, LPVOID  buf, DWORD len, LPDWORD rd, LPVOID ovlp);
+BOOL   WINAPI WriteFile(HANDLE h, LPCVOID buf, DWORD len, LPDWORD wr, LPVOID ovlp);
 
-#ifdef __cplusplus
-}
-#endif
+/* sync & process info */
+DWORD  WINAPI WaitForSingleObject(HANDLE h, DWORD ms);
+BOOL   WINAPI GetExitCodeProcess(HANDLE hProcess, LPDWORD code);
+BOOL   WINAPI CloseHandle(HANDLE hObject);
+
+/* errors */
+VOID   WINAPI SetLastError(DWORD e);
+DWORD  WINAPI GetLastError(void);
+
+/* command line */
+LPCSTR WINAPI GetCommandLineA(void);
+
+/* TLS */
+DWORD  WINAPI TlsAlloc(void);
+BOOL   WINAPI TlsFree(DWORD idx);
+LPVOID WINAPI TlsGetValue(DWORD idx);
+BOOL   WINAPI TlsSetValue(DWORD idx, LPVOID val);
