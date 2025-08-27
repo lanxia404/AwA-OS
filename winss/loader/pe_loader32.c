@@ -1,23 +1,33 @@
 // winss/loader/pe_loader32.c
-// AwA-OS PE32 loader (i386) - minimal, with Windows-style command line building
-// NOTE: focuses on fixing nt_set_command_lineA usage and getenv include.
+// 極簡 32-bit PE 載入器（User-mode），支援：
+//  - 讀檔 -> 佈建 Image（RWX 簡化）
+//  - HIGHLOW 重新配置（.reloc）
+//  - IAT 綁定（依名稱對 NT_HOOKS）
+//  - 呼叫入口點（__stdcall, void(void)）
+//  - 向 ntshim 註冊 pe32_spawn 實作與命令列
+//
+// 注意：這是能過 CI 的最小版本，對安全性與相容性未做完整處理。
+// 未實作：SEH、.tls 回撥初始化、進程/執行緒物件語義、PE 64-bit 等。
 
-#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
-#include <stdlib.h>         // <-- for getenv, malloc, free
+#include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
-#include <fcntl.h>
+#include <sys/stat.h>
 #include <errno.h>
+#include <ctype.h>
 
-#include "../include/win/minwin.h"
-#include "../include/nt/ntdef.h"
-#include "../ntshim32/ntshim_api.h"   // nt_set_command_lineA(), nt_teb_setup_for_current(), etc.
-#include "../include/nt/hooks.h"      // extern struct Hook NT_HOOKS[];
+#include "../ntshim32/ntshim_api.h"   // nt_teb_setup_for_current / nt_set_spawn_impl / nt_set_command_lineA
+#include "../include/win/minwin.h"    // Windows 基本型別（供 Hook 查表）
 
+// ---------------------------------------------------------------------
+// 日誌
 static int is_log(void){
-  static int inited = 0, val = 0;
+  static int inited = 0;
+  static int val = 0;
   if(!inited){
     inited = 1;
     const char* v = getenv("AWAOS_LOG");
@@ -25,128 +35,297 @@ static int is_log(void){
   }
   return val;
 }
-#define LOGF(...) do{ if(is_log()){ fprintf(stderr, "[pe_loader32] " __VA_ARGS__); fputc('\n', stderr);} }while(0)
+#define LOGF(...) do{ if(is_log()){ fprintf(stderr,"[pe_loader32] " __VA_ARGS__); fputc('\n', stderr);} }while(0)
 
-/* -------- Windows 命令列拼接 --------
- * 把 exe 路徑與 argv[1..] 轉成 Windows 期望的一整條命令列字串。
- * 規則要點（簡版）：
- * - 若參數含空白或引號，外層加雙引號。
- * - 位於引號前的連續反斜線要加倍；引號本身要以反斜線脫逸。
- */
-static char* quote_argA(const char* s){
-  int need_quote = 0;
-  for(const char* p=s; *p; ++p){
-    if(*p==' ' || *p=='\t' || *p=='"'){ need_quote = 1; break; }
-  }
-  size_t len = strlen(s);
-  // worst case：每個字元都可能擴張（反斜線加倍 + 引號前加 \），再加上包住的 " 與 NUL
-  size_t cap = len*2 + 3;
-  char* out = (char*)malloc(cap);
-  if(!out) return NULL;
+// ---------------------------------------------------------------------
+// Hook 表宣告（由 ntshim32.c 提供定義）
+struct Hook { const char* dll; const char* name; void* fn; };
+extern struct Hook NT_HOOKS[];
 
-  char* o = out;
-  if(need_quote) *o++ = '"';
+// ---------------------------------------------------------------------
+// 迷你 PE 結構（避免依賴其他外部標頭）
+#define PE_SIGNATURE 0x00004550u /* "PE\0\0" */
 
-  size_t bs_count = 0;
-  for(const char* p=s; *p; ++p){
-    char c = *p;
-    if(c == '\\'){
-      bs_count++;
-      *o++ = '\\';
-    }else if(c == '"'){
-      // 需要把前面的反斜線再加倍一次
-      for(size_t i=0;i<bs_count;i++) *o++ = '\\';
-      bs_count = 0;
-      *o++ = '\\';  // escape the quote
-      *o++ = '"';
-    }else{
-      bs_count = 0;
-      *o++ = c;
-    }
+typedef struct {
+  uint16_t e_magic;    /* "MZ" */
+  uint16_t e_cblp;     uint16_t e_cp;      uint16_t e_crlc;
+  uint16_t e_cparhdr;  uint16_t e_minalloc;uint16_t e_maxalloc;
+  uint16_t e_ss;       uint16_t e_sp;      uint16_t e_csum;
+  uint16_t e_ip;       uint16_t e_cs;      uint16_t e_lfarlc;
+  uint16_t e_ovno;     uint16_t e_res[4];
+  uint16_t e_oemid;    uint16_t e_oeminfo; uint16_t e_res2[10];
+  int32_t  e_lfanew;
+} IMAGE_DOS_HEADER;
+
+typedef struct {
+  uint16_t Machine;
+  uint16_t NumberOfSections;
+  uint32_t TimeDateStamp;
+  uint32_t PointerToSymbolTable;
+  uint32_t NumberOfSymbols;
+  uint16_t SizeOfOptionalHeader;
+  uint16_t Characteristics;
+} IMAGE_FILE_HEADER;
+
+typedef struct {
+  uint32_t VirtualAddress;
+  uint32_t Size;
+} IMAGE_DATA_DIRECTORY;
+
+typedef struct {
+  uint16_t Magic;
+  uint8_t  MajorLinkerVersion;
+  uint8_t  MinorLinkerVersion;
+  uint32_t SizeOfCode;
+  uint32_t SizeOfInitializedData;
+  uint32_t SizeOfUninitializedData;
+  uint32_t AddressOfEntryPoint;
+  uint32_t BaseOfCode;
+  uint32_t BaseOfData;
+  uint32_t ImageBase;
+  uint32_t SectionAlignment;
+  uint32_t FileAlignment;
+  uint16_t MajorOperatingSystemVersion;
+  uint16_t MinorOperatingSystemVersion;
+  uint16_t MajorImageVersion;
+  uint16_t MinorImageVersion;
+  uint16_t MajorSubsystemVersion;
+  uint16_t MinorSubsystemVersion;
+  uint32_t Win32VersionValue;
+  uint32_t SizeOfImage;
+  uint32_t SizeOfHeaders;
+  uint32_t CheckSum;
+  uint16_t Subsystem;
+  uint16_t DllCharacteristics;
+  uint32_t SizeOfStackReserve;
+  uint32_t SizeOfStackCommit;
+  uint32_t SizeOfHeapReserve;
+  uint32_t SizeOfHeapCommit;
+  uint32_t LoaderFlags;
+  uint32_t NumberOfRvaAndSizes;
+  IMAGE_DATA_DIRECTORY DataDirectory[16];
+} IMAGE_OPTIONAL_HEADER32;
+
+typedef struct {
+  uint32_t Signature;         // "PE\0\0"
+  IMAGE_FILE_HEADER FileHeader;
+  IMAGE_OPTIONAL_HEADER32 OptionalHeader;
+} IMAGE_NT_HEADERS32;
+
+typedef struct {
+  uint8_t  Name[8];
+  union { uint32_t PhysicalAddress; uint32_t VirtualSize; } Misc;
+  uint32_t VirtualAddress;
+  uint32_t SizeOfRawData;
+  uint32_t PointerToRawData;
+  uint32_t PointerToRelocations;
+  uint32_t PointerToLinenumbers;
+  uint16_t NumberOfRelocations;
+  uint16_t NumberOfLinenumbers;
+  uint32_t Characteristics;
+} IMAGE_SECTION_HEADER;
+
+typedef struct {
+  uint32_t   Characteristics;
+  uint32_t   TimeDateStamp;
+  uint32_t   ForwarderChain;
+  uint32_t   Name;         // RVA to dll name
+  uint32_t   FirstThunk;   // RVA to IAT
+} IMAGE_IMPORT_DESCRIPTOR;
+
+typedef struct {
+  uint16_t Hint;
+  char     Name[1];
+} IMAGE_IMPORT_BY_NAME;
+
+typedef struct {
+  union { uint32_t ForwarderString; uint32_t Function; uint32_t Ordinal; uint32_t AddressOfData; } u1;
+} IMAGE_THUNK_DATA32;
+
+typedef struct {
+  uint32_t VirtualAddress;
+  uint32_t SizeOfBlock;
+  // WORD TypeOffset[];
+} IMAGE_BASE_RELOCATION;
+
+// ---------------------------------------------------------------------
+// 小工具
+static inline void* rva(void* base, uint32_t rva){ return (void*)((uint8_t*)base + rva); }
+
+static int caseless_eq(const char* a, const char* b){
+  if(!a || !b) return 0;
+  while(*a && *b){
+    char ca = tolower((unsigned char)*a++);
+    char cb = tolower((unsigned char)*b++);
+    if(ca != cb) return 0;
   }
-  if(need_quote){
-    // 結尾引號前的反斜線也要加倍
-    if(bs_count){
-      for(size_t i=0;i<bs_count;i++) *o++ = '\\';
-    }
-    *o++ = '"';
-  }
-  *o = '\0';
-  return out;
+  return *a==0 && *b==0;
 }
 
-static char* build_cmdlineA(const char* exe, char* const* argv){
-  // 把 exe 當作第一個 token；argv 指向 main 的 argv，argv[0] 是 loader 自己，argv[1] 應是 exe 路徑（或我們的 path）
-  // 這裡用我們 loader 確認的 exe 路徑 `exe` 作為第一個 token，之後接上 argv[2..]（若 argv[1] == exe）。
-  // 為了安全起見，不假設 argv[1] 必定等於 exe；我們直接從 argv[2] 開始附加。
-  char* qexe = quote_argA(exe);
-  if(!qexe) return NULL;
-
-  // 預估容量：先給一個適中緩衝，必要時擴張
-  size_t cap = strlen(qexe) + 1 /*space or NUL*/ + 64;
-  char* buf = (char*)malloc(cap);
-  if(!buf){ free(qexe); return NULL; }
-  strcpy(buf, qexe);
-  free(qexe);
-
-  // 將 argv 之中的其餘參數拼上去
-  // 呼叫端會傳入 main 的 argv；假設 argv[0] = loader, argv[1] = exe, 從 argv[2] 起是被轉傳的參數
-  // 若呼叫端用別的方式傳入，這裡仍然只是把 argv[1..] 全部接上去也可。
-  int first = 1;
-  for(char* const* ap = argv; *ap; ++ap){
-    // 跳過 loader 自己與 exe 路徑重複（如果你在呼叫端傳的是 main 的 argv，建議這裡從 argv+2 起迭代）
-    // 為了通用性，這裡簡化：從 argv[0] 開始，但跳過第一個（視為 loader 自己），並且若等於 exe 就跳過一次。
-    if(first){ first = 0; continue; }
-    if(strcmp(*ap, exe) == 0){ continue; }
-
-    char* q = quote_argA(*ap);
-    if(!q){ free(buf); return NULL; }
-
-    size_t need = strlen(buf) + 1 /*space*/ + strlen(q) + 1 /*NUL*/;
-    if(need > cap){
-      cap = need + 64;
-      char* nb = (char*)realloc(buf, cap);
-      if(!nb){ free(q); free(buf); return NULL; }
-      buf = nb;
-    }
-    strcat(buf, " ");
-    strcat(buf, q);
-    free(q);
+static const void* find_hook(const char* dll, const char* name){
+  for(struct Hook* h = NT_HOOKS; h && h->dll; ++h){
+    if(caseless_eq(h->dll, dll) && strcmp(h->name, name)==0) return h->fn;
   }
-  return buf;
+  return NULL;
 }
 
-/* ...（此處省略：你原本的 PE 讀檔、對齊、重定位、IAT 綁定、進入點跳轉等實作）... */
-/* 假設已有：extern struct Hook NT_HOOKS[]; 並在綁定時使用它們。 */
+// ---------------------------------------------------------------------
+// IAT 綁定
+static void bind_imports(void* image, IMAGE_NT_HEADERS32* nt){
+  IMAGE_DATA_DIRECTORY imp = nt->OptionalHeader.DataDirectory[1]; // IMPORT
+  if(!imp.VirtualAddress || !imp.Size) return;
 
-static int run_pe32(const char* path, char* const* argv){
-  // ...（載入、重定位、綁定等過程）...
+  IMAGE_IMPORT_DESCRIPTOR* desc = (IMAGE_IMPORT_DESCRIPTOR*)rva(image, imp.VirtualAddress);
+  for(; desc->Name; ++desc){
+    const char* dllName = (const char*)rva(image, desc->Name);
+    IMAGE_THUNK_DATA32* thunk     = (IMAGE_THUNK_DATA32*)rva(image, desc->FirstThunk);
+    IMAGE_THUNK_DATA32* origthunk = (IMAGE_THUNK_DATA32*)(desc->FirstThunk ?
+                                rva(image, desc->FirstThunk) : (void*)0);
 
-  // 構造 Windows 端看到的命令列
-  char* cmdline = build_cmdlineA(path, argv);
-  if(!cmdline){
-    LOGF("build_cmdlineA failed");
-    return -1;
+    for(; thunk && thunk->u1.AddressOfData; ++thunk, origthunk = origthunk ? origthunk+1 : NULL){
+      const char* sym = NULL;
+      if(origthunk && !(origthunk->u1.Ordinal & 0x80000000u)){
+        IMAGE_IMPORT_BY_NAME* ibn = (IMAGE_IMPORT_BY_NAME*)rva(image, origthunk->u1.AddressOfData);
+        sym = ibn->Name;
+      }else{
+        // 以序號導入：這裡暫不支援
+        sym = NULL;
+      }
+
+      const void* fn = sym ? find_hook(dllName, sym) : NULL;
+      if(!fn){
+        LOGF("Unresolved import: %s!%s", dllName ? dllName : "(null)", sym ? sym : "(ordinal)");
+        thunk->u1.Function = 0;
+      }else{
+        thunk->u1.Function = (uint32_t)(uintptr_t)fn;
+        LOGF("bind: %-14s -> %p", sym, fn);
+      }
+    }
   }
-  // 將命令列交給 NT shim（A 版）
-  nt_set_command_lineA(path, cmdline);
+}
 
-  // 設定目前執行緒的 TEB/TLS（必要）
-  nt_teb_setup_for_current();
+// 重新配置（HIGHLOW）
+static void apply_relocs(void* image, IMAGE_NT_HEADERS32* nt, uintptr_t delta){
+  if(delta == 0) return;
+  IMAGE_DATA_DIRECTORY rel = nt->OptionalHeader.DataDirectory[5]; // BASE RELOC
+  if(!rel.VirtualAddress || !rel.Size) return;
 
-  // ...（跳轉到 PE entrypoint；執行；擷取退出碼等）...
+  uint8_t* base = (uint8_t*)image;
+  uint32_t off = 0;
+  while(off < rel.Size){
+    IMAGE_BASE_RELOCATION* blk = (IMAGE_BASE_RELOCATION*)((uint8_t*)image + rel.VirtualAddress + off);
+    if(blk->SizeOfBlock < sizeof(*blk)) break;
 
-  free(cmdline);
+    uint32_t count = (blk->SizeOfBlock - sizeof(*blk)) / sizeof(uint16_t);
+    uint16_t* entries = (uint16_t*)((uint8_t*)blk + sizeof(*blk));
+    uint32_t pageRVA = blk->VirtualAddress;
+
+    unsigned patched = 0;
+    for(uint32_t i=0;i<count;++i){
+      uint16_t e = entries[i];
+      uint16_t type = (e >> 12) & 0xF;
+      uint16_t ofs  = e & 0x0FFF;
+      if(type == 3 /*HIGHLOW*/){
+        uint32_t* p = (uint32_t*)(base + pageRVA + ofs);
+        *p += (uint32_t)delta;
+        ++patched;
+      }
+    }
+    LOGF("reloc block RVA=0x%x patched=%u", pageRVA, patched);
+    off += blk->SizeOfBlock;
+  }
+}
+
+// ---------------------------------------------------------------------
+// 執行 PE32 （傳回 0 代表成功）
+static int run_pe32(const char* path, char* const* argv_unused){
+  (void)argv_unused;
+
+  int fd = open(path, O_RDONLY);
+  if(fd < 0){ perror("open"); return -1; }
+
+  struct stat st;
+  if(fstat(fd, &st) < 0){ perror("fstat"); close(fd); return -1; }
+  size_t fsz = (size_t)st.st_size;
+
+  void* file = mmap(NULL, fsz, PROT_READ, MAP_PRIVATE, fd, 0);
+  close(fd);
+  if(file == MAP_FAILED){ perror("mmap-file"); return -1; }
+
+  IMAGE_DOS_HEADER* mz = (IMAGE_DOS_HEADER*)file;
+  if(mz->e_magic != 0x5A4D){ munmap(file, fsz); return -1; } // 'MZ'
+
+  IMAGE_NT_HEADERS32* nt = (IMAGE_NT_HEADERS32*)((uint8_t*)file + mz->e_lfanew);
+  if(nt->Signature != PE_SIGNATURE){ munmap(file, fsz); return -1; }
+
+  size_t imgSize = nt->OptionalHeader.SizeOfImage;
+  uint8_t* image = mmap(NULL, imgSize, PROT_READ|PROT_WRITE|PROT_EXEC,
+                        MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+  if(image == MAP_FAILED){ perror("mmap-image"); munmap(file, fsz); return -1; }
+
+  // 複製 headers
+  memcpy(image, file, nt->OptionalHeader.SizeOfHeaders);
+
+  // 複製各節區
+  IMAGE_SECTION_HEADER* sec = (IMAGE_SECTION_HEADER*)((uint8_t*)&nt->OptionalHeader + nt->FileHeader.SizeOfOptionalHeader);
+  for(int i=0; i<nt->FileHeader.NumberOfSections; ++i){
+    uint8_t* dst = image + sec[i].VirtualAddress;
+    uint8_t* src = (uint8_t*)file + sec[i].PointerToRawData;
+    size_t   sz  = sec[i].SizeOfRawData;
+    if(sec[i].PointerToRawData && sz){
+      memcpy(dst, src, sz);
+    }
+  }
+
+  // 重新配置
+  uintptr_t prefer = nt->OptionalHeader.ImageBase;
+  uintptr_t delta  = (uintptr_t)image - prefer;
+  apply_relocs(image, nt, delta);
+
+  // 綁 IAT
+  bind_imports(image, nt);
+
+  // 進入點
+  uint32_t epRVA = nt->OptionalHeader.AddressOfEntryPoint;
+  void (*entry)(void) = (void(*)(void))(image + epRVA);
+
+  LOGF("mapped '%s': pref=0x%08x map=%p delta=%ld (0x%lx)",
+       path, (unsigned)prefer, image, (long)delta, (unsigned long)delta);
+  LOGF("entering entrypoint 0x%08x for %s", epRVA, path);
+
+  // 呼叫
+  entry();
+
+  munmap(file, fsz);
+  // image 不回收，因為進入點可能不會返回；若返回，在 CI 仍可結束行程。
   return 0;
 }
 
+// ---------------------------------------------------------------------
+// pe32_spawn：讓 CreateProcessA 透過橋接回到本 Loader
+static int _loader_spawn_impl(const char* path, const char* cmdline){
+  (void)cmdline; // 目前最小實作忽略 cmdline，未來可擴充成解析 cmdline -> argv
+  return run_pe32(path, NULL) == 0 ? 1 : 0;
+}
+
+// ---------------------------------------------------------------------
 int main(int argc, char** argv){
+  // 初始化 TEB/TLS 等（由 ntdll32/* 提供）
+  nt_teb_setup_for_current();
+
+  // 註冊 spawn 實作，讓 CreateProcessA 能回呼到目前 Loader
+  nt_set_spawn_impl(_loader_spawn_impl);
+
+  // 設定命令列（目前最小：只記錄路徑；若有需要，可把 argv[2..] 連成一條字串傳給 nt_set_command_lineA）
+  if(argc >= 2) nt_set_command_lineA(argv[1], NULL);
+  else          nt_set_command_lineA("", NULL);
+
   if(argc < 2){
-    fprintf(stderr, "Usage: %s <pe32.exe> [args...]\n", argv[0]);
+    fprintf(stderr, "Usage: %s <pe32.exe> [args ...]\n", argv[0]);
     return 1;
   }
-  const char* path = argv[1];
-  LOGF("loading %s", path);
-  int rc = run_pe32(path, argv);
-  return (rc == 0) ? 0 : 1;
+
+  const char* target = argv[1];
+  int rc = run_pe32(target, (argc>2)? &argv[2] : NULL);
+  return (rc==0) ? 0 : 1;
 }
