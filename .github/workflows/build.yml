@@ -74,6 +74,7 @@ jobs:
 
       - name: Integration test cmdlite run hello.exe
         run: |
+          export AWAOS_LOG=1
           printf "run ./tests/win32-hello/hello.exe\nexit\n" \
             | /usr/lib/awaos/pe_loader32 ./tests/win32-cmdlite/cmdlite.exe > cmdlite.out
 
