@@ -22,33 +22,17 @@ __attribute__((weak)) void nt_set_command_lineA(const char* s);
 #endif
 
 #pragma pack(push,1)
-typedef struct {
-  uint16_t e_magic;      uint16_t e_cblp;       uint16_t e_cp;         uint16_t e_crlc;
-  uint16_t e_cparhdr;    uint16_t e_minalloc;   uint16_t e_maxalloc;   uint16_t e_ss;
-  uint16_t e_sp;         uint16_t e_csum;       uint16_t e_ip;         uint16_t e_cs;
-  uint16_t e_lfarlc;     uint16_t e_ovno;       uint16_t e_res[4];     uint16_t e_oemid;
-  uint16_t e_oeminfo;    uint16_t e_res2[10];   int32_t  e_lfanew;
-} IMAGE_DOS_HEADER;
-
+typedef struct { uint16_t e_magic,e_cblp,e_cp,e_crlc,e_cparhdr,e_minalloc,e_maxalloc,e_ss,e_sp,e_csum,e_ip,e_cs,e_lfarlc,e_ovno,e_res[4],e_oemid,e_oeminfo,e_res2[10]; int32_t e_lfanew; } IMAGE_DOS_HEADER;
 typedef struct { uint32_t VirtualAddress, Size; } IMAGE_DATA_DIRECTORY;
-
 #define IMAGE_NUMBEROF_DIRECTORY_ENTRIES 16
 #define IMAGE_DIRECTORY_ENTRY_IMPORT     1
 #define IMAGE_DIRECTORY_ENTRY_BASERELOC  5
-
+typedef struct { uint16_t Machine, NumberOfSections; uint32_t TimeDateStamp, PointerToSymbolTable, NumberOfSymbols; uint16_t SizeOfOptionalHeader, Characteristics; } IMAGE_FILE_HEADER;
 typedef struct {
-  uint16_t Machine, NumberOfSections;
-  uint32_t TimeDateStamp, PointerToSymbolTable, NumberOfSymbols;
-  uint16_t SizeOfOptionalHeader, Characteristics;
-} IMAGE_FILE_HEADER;
-
-typedef struct {
-  uint16_t Magic;
-  uint8_t  MajorLinkerVersion, MinorLinkerVersion;
+  uint16_t Magic; uint8_t MajorLinkerVersion, MinorLinkerVersion;
   uint32_t SizeOfCode, SizeOfInitializedData, SizeOfUninitializedData;
   uint32_t AddressOfEntryPoint, BaseOfCode, BaseOfData;
-  uint32_t ImageBase;
-  uint32_t SectionAlignment, FileAlignment;
+  uint32_t ImageBase, SectionAlignment, FileAlignment;
   uint16_t MajorOSVersion, MinorOSVersion, MajorImageVersion, MinorImageVersion;
   uint16_t MajorSubsystemVersion, MinorSubsystemVersion;
   uint32_t Win32VersionValue, SizeOfImage, SizeOfHeaders, CheckSum;
@@ -57,34 +41,12 @@ typedef struct {
   uint32_t LoaderFlags, NumberOfRvaAndSizes;
   IMAGE_DATA_DIRECTORY DataDirectory[IMAGE_NUMBEROF_DIRECTORY_ENTRIES];
 } IMAGE_OPTIONAL_HEADER32;
-
-typedef struct {
-  uint32_t Signature;
-  IMAGE_FILE_HEADER        FileHeader;
-  IMAGE_OPTIONAL_HEADER32  OptionalHeader;
-} IMAGE_NT_HEADERS32;
-
-typedef struct {
-  uint8_t  Name[8];
-  union { uint32_t PhysicalAddress; uint32_t VirtualSize; } Misc;
-  uint32_t VirtualAddress, SizeOfRawData, PointerToRawData, PointerToRelocations,
-           PointerToLinenumbers; uint16_t NumberOfRelocations, NumberOfLinenumbers;
-  uint32_t Characteristics;
-} IMAGE_SECTION_HEADER;
-
-typedef struct {
-  uint32_t   OriginalFirstThunk;
-  uint32_t   TimeDateStamp;
-  uint32_t   ForwarderChain;
-  uint32_t   Name;
-  uint32_t   FirstThunk;
-} IMAGE_IMPORT_DESCRIPTOR;
-
+typedef struct { uint32_t Signature; IMAGE_FILE_HEADER FileHeader; IMAGE_OPTIONAL_HEADER32 OptionalHeader; } IMAGE_NT_HEADERS32;
+typedef struct { uint8_t Name[8]; union { uint32_t PhysicalAddress; uint32_t VirtualSize; } Misc; uint32_t VirtualAddress, SizeOfRawData, PointerToRawData, PointerToRelocations, PointerToLinenumbers; uint16_t NumberOfRelocations, NumberOfLinenumbers; uint32_t Characteristics; } IMAGE_SECTION_HEADER;
+typedef struct { uint32_t OriginalFirstThunk, TimeDateStamp, ForwarderChain, Name, FirstThunk; } IMAGE_IMPORT_DESCRIPTOR;
 typedef struct { uint32_t u1; } IMAGE_THUNK_DATA32;
 #define IMAGE_ORDINAL_FLAG32 0x80000000u
-
 typedef struct { uint16_t Hint; char Name[1]; } IMAGE_IMPORT_BY_NAME;
-
 typedef struct { uint32_t VirtualAddress, SizeOfBlock; } IMAGE_BASE_RELOCATION;
 #pragma pack(pop)
 
@@ -94,18 +56,9 @@ extern struct Hook NT_HOOKS[];
 static void die(const char* s){ perror(s); _exit(127); }
 static void* rva(void* base, uint32_t off){ return off ? (uint8_t*)base + off : NULL; }
 
-static int ieq(const char* a, const char* b){
-  for (; *a && *b; ++a,++b){
-    int ca=tolower((unsigned char)*a), cb=tolower((unsigned char)*b);
-    if (ca!=cb) return 0;
-  }
-  return *a==0 && *b==0;
-}
-
 /* 去底線前綴 + 去 stdcall 尾端 @NN 裝飾 */
 static void undecorate(const char* in, char* out, size_t cap){
-  size_t i=0, j=0;
-  if (in[0]=='_') ++i;
+  size_t i=0, j=0; if (in[0]=='_') ++i;
   for (; in[i] && j+1<cap; ++i){
     if (in[i]=='@'){
       size_t k=i+1; int all_digit=1;
@@ -117,43 +70,34 @@ static void undecorate(const char* in, char* out, size_t cap){
   out[j]=0;
 }
 
-/* 規範化 DLL 名：轉小寫 + 去掉尾端 ".dll"（若有） */
+/* 規範化 DLL 名：轉小寫 + 去 ".dll" */
 static void canon_dll(const char* in, char* out, size_t cap){
   size_t j=0;
   for (size_t i=0; in && in[i] && j+1<cap; ++i){
-    char c = in[i];
-    if (c>='A' && c<='Z') c = (char)(c+32);
-    out[j++] = c;
+    char c = in[i]; if (c>='A' && c<='Z') c = (char)(c+32); out[j++] = c;
   }
   out[j]=0;
   size_t L = strlen(out);
-  if (L>=4 && out[L-4]=='.' && out[L-3]=='d' && out[L-2]=='l' && out[L-1]=='l'){
-    out[L-4]=0; /* strip ".dll" */
-  }
+  if (L>=4 && out[L-4]=='.' && out[L-3]=='d' && out[L-2]=='l' && out[L-1]=='l') out[L-4]=0;
 }
 
-/* 更魯棒的匯入解析：先只看函式名；不行再看 DLL+函式名 */
+/* 先以函式名直配；不行再 DLL+函式名 */
 static void* resolve_import(const char* dll, const char* sym){
   char clean[128]; undecorate(sym, clean, sizeof(clean));
 
-  /* 1) 名稱直配（忽略 DLL） */
   for (struct Hook* h=NT_HOOKS; h && h->dll; ++h){
     if (strcmp(h->name, clean)==0) return h->fn;
   }
-
-  /* 2) DLL + 名稱（兩邊 DLL 規範化後比較） */
   char want[64]; canon_dll(dll, want, sizeof(want));
   for (struct Hook* h=NT_HOOKS; h && h->dll; ++h){
     char have[64]; canon_dll(h->dll, have, sizeof(have));
     if (strcmp(have, want)==0 && strcmp(h->name, clean)==0) return h->fn;
   }
-
   return NULL;
 }
 
 static void* map_image_at(uint32_t base, size_t sz, int try_fixed){
-  int flags = MAP_PRIVATE|MAP_ANON;
-  void* p;
+  int flags = MAP_PRIVATE|MAP_ANON; void* p;
   if (try_fixed){
     p = mmap((void*)(uintptr_t)base, sz, PROT_READ|PROT_WRITE|PROT_EXEC, flags|MAP_FIXED_NOREPLACE, -1, 0);
     if (p != MAP_FAILED) return p;
@@ -208,7 +152,7 @@ static void set_cmdline_from_argv(int argc, char** argv){
 
 int main(int argc, char** argv){
   if (NtCurrentTeb) NtCurrentTeb();            /* 初始化 TEB（若可用） */
-  set_cmdline_from_argv(argc, argv);           /* 先設命令列，便於早期使用 */
+  set_cmdline_from_argv(argc, argv);           /* 先設命令列 */
 
   if (argc < 2){
     fprintf(stderr,"usage: %s program.exe [args...]\n", argv[0]);
@@ -253,6 +197,7 @@ int main(int argc, char** argv){
     apply_relocs(image, nt, (uint32_t)(uintptr_t)image);
   }
 
+  /* 解析匯入 */
   IMAGE_DATA_DIRECTORY impdir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
   if (impdir.VirtualAddress && impdir.Size){
     for (IMAGE_IMPORT_DESCRIPTOR* d = (IMAGE_IMPORT_DESCRIPTOR*)((uint8_t*)image + impdir.VirtualAddress);
