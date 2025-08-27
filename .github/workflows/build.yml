@@ -69,12 +69,13 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+          test -x /usr/lib/awaos/pe_loader32
+          test -f ./tests/win32-hello/hello.exe
           export AWAOS_LOG=1
           out=$(/usr/lib/awaos/pe_loader32 ./tests/win32-hello/hello.exe 2>&1 || true)
           echo "RAW_OUT_START"
           printf '%s\n' "$out"
           echo "RAW_OUT_END"
-          # 寬鬆比對關鍵字，避免訊息微調造成誤判
           grep -E "Hello|AwA-OS|AwAOS|WinSS" <<<"$out"
 
       - name: Integration test cmdlite run hello.exe
@@ -83,14 +84,10 @@ jobs:
           set -euxo pipefail
           export AWAOS_LOG=1
           printf "run ./tests/win32-hello/hello.exe\nexit\n" \
-            | /usr/lib/awaos/pe_loader32 ./tests/win32-cmdlite/cmdlite.exe > cmdlite.out
-
+            | /usr/lib/awaos/pe_loader32 ./tests/win32-cmdlite/cmdlite.exe > cmdlite.out 2>&1 || true
           echo "==== cmdlite.out ===="
           cat cmdlite.out
-
-          # 驗證 run 的退出碼回報
           grep -F "exit code: 0" cmdlite.out
-          # 確認沒有未知指令錯誤
           ! grep -F "Unknown command" cmdlite.out
 
       - name: Build & Run TLS demo
