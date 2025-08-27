@@ -84,6 +84,64 @@ void nt_set_command_lineA(const char* s) {
 LPCSTR  WINAPI GetCommandLineA(void) { return g_cmdlineA; }
 LPCWSTR WINAPI GetCommandLineW(void) { return g_cmdlineW; }
 
+/* ---- 簡易 KERNEL32 模組/符號查詢 ---- */
+/* 我們用假的 HMODULE（常量 1）代表 kernel32，本質是從 NT_HOOKS 查 */
+static HMODULE g_kernel32 = (HMODULE)(uintptr_t)1;
+
+/* 與 ntshim32 的 Hook 表一致 */
+struct Hook { const char* dll; const char* name; void* fn; };
+extern struct Hook NT_HOOKS[];
+
+static int ieq(const char* a, const char* b){
+  for (; *a && *b; ++a,++b){
+    int ca = (*a>='A'&&*a<='Z') ? (*a+32) : (unsigned char)*a;
+    int cb = (*b>='A'&&*b<='Z') ? (*b+32) : (unsigned char)*b;
+    if (ca!=cb) return 0;
+  }
+  return *a==0 && *b==0;
+}
+
+HMODULE WINAPI GetModuleHandleA(LPCSTR name){
+  if (!name || !*name) return g_kernel32;
+  /* 規範化：去 .dll、忽略大小寫 */
+  char buf[64]; size_t j=0;
+  for (size_t i=0; name[i] && j+1<sizeof(buf); ++i){
+    char c = name[i];
+    if (c>='A'&&c<='Z') c=(char)(c+32);
+    buf[j++]=c;
+  }
+  buf[j]=0;
+  size_t L=strlen(buf);
+  if (L>=4 && buf[L-4]=='.'&&buf[L-3]=='d'&&buf[L-2]=='l'&&buf[L-1]=='l') buf[L-4]=0;
+  if (ieq(buf,"kernel32")) return g_kernel32;
+  /* 目前只支援 kernel32，其他回 NULL */
+  return NULL;
+}
+
+FARPROC WINAPI GetProcAddress(HMODULE h, LPCSTR name){
+  if (!h || !name) return NULL;
+  /* 名稱直配（與 loader 的策略一致） */
+  for (struct Hook* p=NT_HOOKS; p && p->dll; ++p){
+    if (strcmp(p->name, name)==0) return (FARPROC)p->fn;
+  }
+  /* 再嘗試忽略 stdcall 裝飾的版本 */
+  char clean[128]; size_t i=0,j=0;
+  if (name[0]=='_') ++i;
+  for (; name[i] && j+1<sizeof(clean); ++i){
+    if (name[i]=='@'){
+      size_t k=i+1; int all_digit=1;
+      while (name[k]){ if (name[k]<'0'||name[k]>'9'){ all_digit=0; break; } ++k; }
+      if (all_digit) break;
+    }
+    clean[j++] = name[i];
+  }
+  clean[j]=0;
+  for (struct Hook* p=NT_HOOKS; p && p->dll; ++p){
+    if (strcmp(p->name, clean)==0) return (FARPROC)p->fn;
+  }
+  return NULL;
+}
+
 /* ---- CreateProcess / Wait / ExitCode / Close ---- */
 
 static const char* pick_loader(void) {
@@ -244,6 +302,9 @@ struct Hook NT_HOOKS[] = {
   {"KERNEL32.DLL","CloseHandle",         (void*)CloseHandle},
   {"KERNEL32.DLL","GetCommandLineA",     (void*)GetCommandLineA},
   {"KERNEL32.DLL","GetCommandLineW",     (void*)GetCommandLineW},
+  /* 模組/符號查詢（部分工具鏈會用到） */
+  {"KERNEL32.DLL","GetModuleHandleA",    (void*)GetModuleHandleA},
+  {"KERNEL32.DLL","GetProcAddress",      (void*)GetProcAddress},
   /* Threads & TLS */
   {"KERNEL32.DLL","CreateThread",        (void*)CreateThread},
   {"KERNEL32.DLL","ExitThread",          (void*)ExitThread},
