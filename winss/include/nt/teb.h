@@ -15,6 +15,8 @@ extern "C" {
 AWA_EXPORT void  _nt_teb_setup_for_current(void);
 /* 取得目前 TEB 基底（除錯用） */
 AWA_EXPORT void* _nt_teb_base(void);
+/* Windows 相容 API：回傳當前執行緒的 TEB 指標（供 Set/GetLastError 等使用） */
+AWA_EXPORT void* NtCurrentTeb(void);
 
 #ifdef __cplusplus
 }
