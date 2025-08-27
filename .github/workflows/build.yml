@@ -68,8 +68,8 @@ jobs:
       - name: Smoke test hello.exe
         shell: bash
         run: |
-          set -euxo pipefail
           export AWAOS_LOG=1
+          set -euxo pipefail
           out=$(/usr/lib/awaos/pe_loader32 ./tests/win32-hello/hello.exe || true)
           echo "OUTPUT => [$out]"
           # 寬鬆比對關鍵字，避免訊息微調造成誤判
