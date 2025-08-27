@@ -72,6 +72,17 @@ jobs:
           test -x /usr/lib/awaos/pe_loader32
           test -f ./tests/win32-hello/hello.exe
           export AWAOS_LOG=1
+          out=$(/usr/lib/awaos/pe_loader32 ./tests/win32-hello/hello.exe 2>&1 || true)
+          echo "RAW_OUT_START"
+          printf '%s\n' "$out"
+          echo "RAW_OUT_END"
+          grep -E "Hello|AwA-OS|AwAOS|WinSS" <<<"$out"
+
+      - name: Integration test cmdlite run hello.exe
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export AWAOS_LOG=1
           printf "run ./tests/win32-hello/hello.exe\nexit\n" \
             | /usr/lib/awaos/pe_loader32 ./tests/win32-cmdlite/cmdlite.exe \
               > cmdlite.out 2>&1 || true
