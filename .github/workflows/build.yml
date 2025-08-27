@@ -102,6 +102,6 @@ jobs:
           i686-w64-mingw32-gcc tests/win32-tls-demo/tls_demo.c -s -o tests/win32-tls-demo/tls_demo.exe \
             -ffreestanding -fno-asynchronous-unwind-tables -fno-stack-protector \
             -nostdlib -Wl,--entry=_main@0 -Wl,--subsystem,console -lkernel32
-          out=$(/usr/lib/awaos/pe_loader32 ./tests/win32-tls-demo/tls_demo.exe || true)
+          out=$(/usr/lib/awaos/pe_loader32 ./tests/win32-tls-demo/tls_demo.exe 2>&1 || true)
           echo "TLS_OUT=[$out]"
           echo "$out" | grep -F "ok"
