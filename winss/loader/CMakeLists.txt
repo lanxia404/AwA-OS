@@ -1,8 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 add_executable(pe_loader32
-  pe_loader32.c
-  pe_spawn_shim.c    # 新增的 shim
+  pe_loader32.c 
 )
 
 target_include_directories(pe_loader32 PRIVATE
