@@ -2,7 +2,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <sys/types.h>
-#include "ntshim_api.h"
+#include "../ntshim32/ntshim_api.h"
 
 /* 由 Loader 註冊的真正實作（在本行程生命週期內有效） */
 static pe32_spawn_fn g_spawn_impl = NULL;
