@@ -60,13 +60,15 @@ jobs:
             -ffreestanding -fno-asynchronous-unwind-tables \
             -nostdlib -Wl,--entry=_main@0 -Wl,--subsystem,console -lkernel32
           i686-w64-mingw32-gcc tests/win32-cmdlite/cmdlite.c -s -o tests/win32-cmdlite/cmdlite.exe \
-            -ffreestanding -fno-asynchronous-unwind-tables \
+            -ffreestanding -fno-asynchronous-unwind-tables -fno-stack-protector \
             -nostdlib -Wl,--entry=_main@0 -Wl,--subsystem,console -lkernel32
           file tests/win32-hello/hello.exe
           file tests/win32-cmdlite/cmdlite.exe
 
       - name: Smoke test hello.exe
+        shell: bash
         run: |
+          set -euxo pipefail
           export AWAOS_LOG=1
           out=$(/usr/lib/awaos/pe_loader32 ./tests/win32-hello/hello.exe || true)
           echo "OUTPUT => [$out]"
@@ -74,7 +76,9 @@ jobs:
           grep -E "Hello|AwA-OS|AwAOS|WinSS" <<<"$out"
 
       - name: Integration test cmdlite run hello.exe
+        shell: bash
         run: |
+          set -euxo pipefail
           export AWAOS_LOG=1
           printf "run ./tests/win32-hello/hello.exe\nexit\n" \
             | /usr/lib/awaos/pe_loader32 ./tests/win32-cmdlite/cmdlite.exe > cmdlite.out
@@ -90,10 +94,10 @@ jobs:
       - name: Build & Run TLS demo
         shell: bash
         run: |
-          export AWAOS_LOG=1
           set -euxo pipefail
+          export AWAOS_LOG=1
           i686-w64-mingw32-gcc tests/win32-tls-demo/tls_demo.c -s -o tests/win32-tls-demo/tls_demo.exe \
-            -ffreestanding -fno-asynchronous-unwind-tables \
+            -ffreestanding -fno-asynchronous-unwind-tables -fno-stack-protector \
             -nostdlib -Wl,--entry=_main@0 -Wl,--subsystem,console -lkernel32
           out=$(/usr/lib/awaos/pe_loader32 ./tests/win32-tls-demo/tls_demo.exe || true)
           echo "TLS_OUT=[$out]"
