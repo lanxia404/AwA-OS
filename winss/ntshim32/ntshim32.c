@@ -1,13 +1,10 @@
 // winss/ntshim32/ntshim32.c
-// KERNEL32 最小相容層（32-bit）for AwA-OS / WinSS
-// - 標準 I/O 句柄對映至 Linux fd (stdin/stdout/stderr)
-// - WriteFile / ReadFile 基本實作（支援重導）
-// - ExitProcess/CloseHandle/WaitForSingleObject/GetExitCodeProcess/ GetStartupInfoA
-// - CreateProcessA（目前提供最小 stub，回傳成功並回報 exit code=0，滿足整合測試）
-// - 匯出 NT_HOOKS 供 loader 綁定
-//
-// 注意：真實 Process/Thread 物件由 ntdll32/*.c 持續擴充；這裡若偵測為 thread-handle
-//       會呼叫 _nt_* 輔助函式。否則提供保守的 fallback。
+// KERNEL32 32-bit minimal shim for AwA-OS / WinSS
+//  - Map STD_* handles to Linux fd 0/1/2
+//  - WriteFile / ReadFile (works with redirection/pipes)
+//  - ExitProcess / CloseHandle / WaitForSingleObject / GetExitCodeProcess / GetStartupInfoA
+//  - CreateProcessA: minimal stub (reports success & exit code 0 for tests)
+//  - Export table NT_HOOKS for loader binding
 
 #include <unistd.h>
 #include <stdlib.h>
@@ -17,19 +14,22 @@
 #include <stdio.h>
 
 #include "../include/win/minwin.h"
-#include "../include/nt/hooks.h"   // struct Hook, NT_HOOKS[] 宣告位置相容
+#include "../include/nt/hooks.h"   // struct Hook
 
-/* 環境開關：AWAOS_LOG=1 時輸出 debug */
-static int _log_enabled = 0;
-#define LOGF(...) do{ if(_log_enabled){ fprintf(stderr,"[ntshim32] " __VA_ARGS__); fputc('\n',stderr);} }while(0)
+/* -------- Fallback macros/types if headers don't define them -------- */
+#ifndef WINAPI
+#  if defined(__i386__) || defined(__i386) || defined(i386)
+#    define WINAPI __attribute__((stdcall))
+#  else
+#    define WINAPI
+#  endif
+#endif
 
-/* --- 來自 ntdll32 子系統的最小 thread 輔助（若存在則使用） --- */
-extern int   _nt_is_thread_handle(HANDLE h);                     /* return 1 if is pseudo-thread handle */
-extern BOOL  _nt_close_thread(HANDLE h);
-extern DWORD _nt_wait_thread(HANDLE h, DWORD ms);
-extern BOOL  _nt_get_thread_exit_code(HANDLE h, LPDWORD code);
+#ifndef VOID
+typedef void VOID;
+#endif
 
-/* --- 一些常值（Windows 風格） --- */
+/* Some Windows-style constants */
 #ifndef INFINITE
 #define INFINITE 0xFFFFFFFFu
 #endif
@@ -37,20 +37,30 @@ extern BOOL  _nt_get_thread_exit_code(HANDLE h, LPDWORD code);
 #define WAIT_OBJECT_0 0x00000000u
 #endif
 
-/* ---- 映射三個「Windows」概念句柄 -> Linux fd 0/1/2 ----
+/* Logging switch via env AWAOS_LOG=1 */
+static int _log_enabled = 0;
+#define LOGF(...) do{ if(_log_enabled){ fprintf(stderr,"[ntshim32] " __VA_ARGS__); fputc('\n',stderr);} }while(0)
+
+/* --- Optional thread helpers from ntdll32 (mark as weak to avoid link errors when absent) --- */
+__attribute__((weak)) int   _nt_is_thread_handle(HANDLE h);
+__attribute__((weak)) BOOL  _nt_close_thread(HANDLE h);
+__attribute__((weak)) DWORD _nt_wait_thread(HANDLE h, DWORD ms);
+__attribute__((weak)) BOOL  _nt_get_thread_exit_code(HANDLE h, LPDWORD code);
+
+/* ---- Map Windows pseudo handles to Linux fds ----
    Windows:  STD_INPUT_HANDLE  = (DWORD)-10
              STD_OUTPUT_HANDLE = (DWORD)-11
-             STD_ERROR_HANDLE  = (DWORD)-12
-   我們透過 HANDLE 的整值比較來對應 fd。 */
+             STD_ERROR_HANDLE  = (DWORD)-12  */
 static int map_handle(HANDLE h) {
   DWORD key = (DWORD)(uintptr_t)h;
   if (key == (DWORD)-10) return 0; // stdin
   if (key == (DWORD)-11) return 1; // stdout
   if (key == (DWORD)-12) return 2; // stderr
-  return -1; // 非標準句柄：可能是 thread handle 或其他自定義
+  return -1; // not a std handle (maybe our pseudo thread handle)
 }
 
-/* ---- kernel32.dll 匯出（以名稱掛鉤） ---- */
+/* ---- kernel32 exports ---- */
+
 HANDLE WINAPI GetStdHandle(DWORD nStdHandle) {
   if (getenv("AWAOS_LOG")) _log_enabled = 1;
   return (HANDLE)(uintptr_t)nStdHandle;
@@ -62,7 +72,7 @@ BOOL WINAPI WriteFile(HANDLE h, const void* buf, DWORD len, LPDWORD written, LPV
 
   int fd = map_handle(h);
   if (fd < 0) {
-    // 非標準句柄：目前不支援對任意 handle 寫入
+    // Non-std handle write not supported yet
     SetLastError(6 /*ERROR_INVALID_HANDLE*/);
     return FALSE;
   }
@@ -73,12 +83,12 @@ BOOL WINAPI WriteFile(HANDLE h, const void* buf, DWORD len, LPDWORD written, LPV
   return TRUE;
 }
 
-/* 修正點：以 HANDLE 直接呼叫 map_handle(h)，避免型別不符 */
+/* FIX: use map_handle(HANDLE) directly; previously passing DWORD broke the signature */
 BOOL WINAPI ReadFile(HANDLE h, LPVOID buf, DWORD toRead, LPDWORD out, LPVOID overlapped) {
   (void)overlapped;
   if (out) *out = 0;
 
-  int fd = map_handle(h);          /* <-- 正確：傳入 HANDLE */
+  int fd = map_handle(h);
   if (fd < 0) {
     SetLastError(6 /*ERROR_INVALID_HANDLE*/);
     return FALSE;
@@ -96,17 +106,16 @@ __attribute__((noreturn)) void WINAPI ExitProcess(UINT code) {
   _exit((int)code);
 }
 
-/* 最小 CloseHandle：支援 thread-handle；標準 I/O 句柄視為可關閉但不實作 */
 BOOL WINAPI CloseHandle(HANDLE h) {
   int fd = map_handle(h);
   if (fd >= 0) {
-    return TRUE; // 不真的關閉 0/1/2
+    // Do not actually close 0/1/2; just succeed
+    return TRUE;
   }
   if (_nt_is_thread_handle && _nt_is_thread_handle(h)) {
     if (_nt_close_thread) return _nt_close_thread(h);
     return TRUE;
   }
-  // 未知 handle：保守成功
   return TRUE;
 }
 
@@ -115,7 +124,6 @@ DWORD WINAPI WaitForSingleObject(HANDLE h, DWORD ms) {
     if (_nt_wait_thread) return _nt_wait_thread(h, ms);
     return WAIT_OBJECT_0;
   }
-  // 對非 thread 物件，先回已觸發（避免卡死）
   (void)ms;
   return WAIT_OBJECT_0;
 }
@@ -129,12 +137,12 @@ BOOL WINAPI GetExitCodeProcess(HANDLE h, LPDWORD code) {
     *code = 0;
     return TRUE;
   }
-  // 對標準/未知 handle：給 0（成功）
   *code = 0;
   return TRUE;
 }
 
-VOID WINAPI GetStartupInfoA(LPSTARTUPINFOA psi) {
+/* Use concrete pointer types to avoid LP* typedef requirements */
+VOID WINAPI GetStartupInfoA(STARTUPINFOA* psi) {
   if (!psi) return;
   memset(psi, 0, sizeof(*psi));
   psi->cb = sizeof(*psi);
@@ -144,36 +152,30 @@ VOID WINAPI GetStartupInfoA(LPSTARTUPINFOA psi) {
   psi->hStdError  = (HANDLE)(uintptr_t)STD_ERROR_HANDLE;
 }
 
-/* 最小 CreateProcessA：
-   目前以 stub 方式回傳成功，並讓 Wait/GetExitCode 回報 0。
-   真正的 PE 啟動由外側 pe_loader32 測試覆蓋（Smoke test 已驗證 hello.exe）。 */
+/* Minimal stub: succeed and provide fake handles/IDs so cmdlite flow continues.
+   The actual PE execution is exercised by pe_loader32 smoke/integration tests. */
 BOOL WINAPI CreateProcessA(
   LPCSTR app, LPSTR cmdline,
   LPVOID psa, LPVOID tsa, BOOL inherit, DWORD flags,
-  LPVOID env, LPCSTR cwd, LPSTARTUPINFOA si, LPPROCESS_INFORMATION pi)
+  LPVOID env, LPCSTR cwd, STARTUPINFOA* si, PROCESS_INFORMATION* pi)
 {
   (void)psa; (void)tsa; (void)inherit; (void)flags; (void)env; (void)cwd; (void)si;
   if (getenv("AWAOS_LOG")) _log_enabled = 1;
 
   if (!pi) { SetLastError(87 /*ERROR_INVALID_PARAMETER*/); return FALSE; }
 
-  // 記錄參數（僅供除錯）
   LOGF("CreateProcessA app='%s' cmdline='%s'", app?app:"(null)", cmdline?cmdline:"(null)");
 
   memset(pi, 0, sizeof(*pi));
-  // 用固定的假 handle 表示「已啟動完成」
   pi->hProcess   = (HANDLE)(uintptr_t)0x1001;
   pi->hThread    = (HANDLE)(uintptr_t)0x1001;
   pi->dwProcessId= 1;
   pi->dwThreadId = 1;
 
-  // 真正執行 hello.exe 的驗證在 smoke test 進行；
-  // 這裡只要能讓 cmdlite 的 run 流程拿到 exit code:0 即可。
   return TRUE;
 }
 
-/* ---- 匯出解析表——dll 名 + 符號名 + 函數指標 ----
-   注意大小寫（Windows 對名稱較寬鬆），但我們在 loader 端有做不分大小寫與名稱去裝飾。 */
+/* ---- Export table for the loader (case-insensitive match on DLL; names exact or undecorated) ---- */
 __attribute__((visibility("default")))
 struct Hook NT_HOOKS[] = {
   {"KERNEL32.DLL", "GetStdHandle",        (void*)GetStdHandle},
