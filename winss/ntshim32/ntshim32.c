@@ -2,15 +2,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#include <stdio.h>   /* LOGF 需要 fprintf/fputc/stderr */
+#include <stdio.h>
 #include <errno.h>
 #include <time.h>
+#include <ctype.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <unistd.h>
-#include <ctype.h>
 #include "../include/win/minwin.h"
 #include "../include/nt/ntdef.h"
 #include "../include/nt/hooks.h"
@@ -21,7 +20,7 @@ int   _nt_wait_thread(HANDLE h, DWORD ms);
 DWORD _nt_get_thread_exit_code(HANDLE h);
 BOOL  _nt_close_thread(HANDLE h);
 
-/* ---- 可選除錯輸出（AWAOS_LOG=1 啟用） ---- */
+/* ---- 日誌 ---- */
 static int _log_enabled = 0;
 __attribute__((constructor))
 static void _init_log(void){
@@ -30,60 +29,107 @@ static void _init_log(void){
 }
 #define LOGF(...) do{ if(_log_enabled){ fprintf(stderr,"[ntshim32] " __VA_ARGS__); fputc('\n',stderr);} }while(0)
 
-/* 工具：sleep 毫秒 */
-static void ms_sleep(unsigned ms){
-  struct timespec ts; ts.tv_sec = ms / 1000; ts.tv_nsec = (long)(ms % 1000) * 1000000L; nanosleep(&ts, NULL);
-}
+/* ---- 標準把手映射（允許 SetStdHandle 覆寫） ---- */
+static int g_std_fd_in  = 0;
+static int g_std_fd_out = 1;
+static int g_std_fd_err = 2;
 
-/* 標準句柄對應 */
-static int map_handle(DWORD h) {
-  if (h == (DWORD)-10) return 0;   /* stdin  */
-  if (h == (DWORD)-11) return 1;   /* stdout */
-  if (h == (DWORD)-12) return 2;   /* stderr */
-  if (h <= 2u) return (int)h;      /* 容忍直接傳 0/1/2 */
+static int map_handle(HANDLE h) {
+  uintptr_t v = (uintptr_t)h;
+  if (v == (uintptr_t)STD_INPUT_HANDLE)  return g_std_fd_in;
+  if (v == (uintptr_t)STD_OUTPUT_HANDLE) return g_std_fd_out;
+  if (v == (uintptr_t)STD_ERROR_HANDLE)  return g_std_fd_err;
+  /* 也容忍直接傳 0/1/2 */
+  if (v <= 2u) return (int)v;
   return -1;
 }
 
 /* ---- KERNEL32 I/O ---- */
-HANDLE WINAPI GetStdHandle(DWORD nStdHandle){ return (HANDLE)(uintptr_t)nStdHandle; }
+HANDLE WINAPI GetStdHandle(DWORD nStdHandle){
+  switch (nStdHandle) {
+    case STD_INPUT_HANDLE:  return (HANDLE)(uintptr_t)STD_INPUT_HANDLE;
+    case STD_OUTPUT_HANDLE: return (HANDLE)(uintptr_t)STD_OUTPUT_HANDLE;
+    case STD_ERROR_HANDLE:  return (HANDLE)(uintptr_t)STD_ERROR_HANDLE;
+    default: return (HANDLE)(uintptr_t)nStdHandle;
+  }
+}
+
+BOOL WINAPI SetStdHandle(DWORD nStdHandle, HANDLE h){
+  int fd = map_handle(h);
+  if (fd < 0) return FALSE;
+  switch (nStdHandle) {
+    case STD_INPUT_HANDLE:  g_std_fd_in  = fd; break;
+    case STD_OUTPUT_HANDLE: g_std_fd_out = fd; break;
+    case STD_ERROR_HANDLE:  g_std_fd_err = fd; break;
+    default: return FALSE;
+  }
+  LOGF("SetStdHandle(%ld -> fd=%d)", (long)nStdHandle, fd);
+  return TRUE;
+}
 
 BOOL WINAPI WriteFile(HANDLE h, LPCVOID buf, DWORD len, LPDWORD written, LPVOID ovl){
-  (void)ovl; int fd = map_handle((DWORD)(uintptr_t)h); if (fd < 0) return FALSE;
-  ssize_t n = write(fd, buf, (size_t)len); if (written) *written = (DWORD)((n < 0) ? 0 : n); return (n >= 0) ? TRUE : FALSE;
+  (void)ovl; int fd = map_handle(h); if (fd < 0) return FALSE;
+  ssize_t n = write(fd, buf, (size_t)len);
+  if (written) *written = (DWORD)((n < 0) ? 0 : n);
+  return (n >= 0) ? TRUE : FALSE;
 }
 
 BOOL WINAPI ReadFile(HANDLE h, LPVOID buf, DWORD toRead, LPDWORD out, LPVOID overlapped){
-  (void)overlapped; int fd = map_handle((DWORD)(uintptr_t)h); if (fd < 0) return FALSE;
+  (void)overlapped; int fd = map_handle(h); if (fd < 0) return FALSE;
   if (toRead == 0) { if (out) *out = 0; return TRUE; }
-  ssize_t n = read(fd, buf, (size_t)toRead); if (n < 0) return FALSE; if (out) *out = (DWORD)n; return TRUE;
+  ssize_t n = read(fd, buf, (size_t)toRead);
+  if (n < 0) return FALSE;
+  if (out) *out = (DWORD)n;
+  return TRUE;
 }
 
-/* Console A 版 → 直接走 File 路徑（參考官方建議：重導時應用 WriteFile） */
+/* Console A 版 → 統一走 WriteFile/ReadFile，官方也建議在重導時使用 WriteFile。 */
 BOOL WINAPI WriteConsoleA(HANDLE h, const char* buf, DWORD len, LPDWORD written, LPVOID ovl){ return WriteFile(h, buf, len, written, ovl); }
 BOOL WINAPI ReadConsoleA (HANDLE h, char*       buf, DWORD len, LPDWORD readout, LPVOID ovl){ return ReadFile (h, buf, len, readout, ovl); }
 
-BOOL WINAPI FlushFileBuffers(HANDLE h){ int fd = map_handle((DWORD)(uintptr_t)h); if (fd < 0) return FALSE; if (fd > 2) (void)fsync(fd); return TRUE; }
+BOOL WINAPI FlushFileBuffers(HANDLE h){
+  int fd = map_handle(h); if (fd < 0) return FALSE;
+  if (fd > 2) (void)fsync(fd);
+  return TRUE;
+}
 
-/* **修正點：正確回報管線/主控台/檔案** */
+/* **修正點：正確回傳 PIPE/TTY/FILE** */
 DWORD WINAPI GetFileType(HANDLE hFile){
-  int fd = map_handle((DWORD)(uintptr_t)hFile);
+  int fd = map_handle(hFile);
   if (fd < 0) return FILE_TYPE_UNKNOWN;
 
   struct stat st;
   if (fstat(fd, &st) == 0) {
-    if (S_ISFIFO(st.st_mode)) return FILE_TYPE_PIPE;   /* pipeline / pipe */
-    if (S_ISCHR (st.st_mode)) return FILE_TYPE_CHAR;   /* TTY 裝置等 */
-    if (S_ISREG (st.st_mode)) return FILE_TYPE_DISK;   /* 一般檔案 */
+    if (S_ISFIFO(st.st_mode)) return FILE_TYPE_PIPE;
+    if (S_ISCHR (st.st_mode)) return FILE_TYPE_CHAR;
+    if (S_ISREG (st.st_mode)) return FILE_TYPE_DISK;
   }
-  /* 退路：TTY 檢查 */
   if (isatty(fd)) return FILE_TYPE_CHAR;
-  return FILE_TYPE_DISK; /* 無法判別時偏保守回檔案 */
+  return FILE_TYPE_DISK;
 }
 
 BOOL WINAPI GetConsoleMode(HANDLE h, LPDWORD mode){ if (mode) *mode = 0; return TRUE; }
 BOOL WINAPI SetConsoleMode(HANDLE h, DWORD mode){ (void)h; (void)mode; return TRUE; }
 
 __attribute__((noreturn)) void WINAPI ExitProcess(UINT code){ _exit((int)code); }
+
+/* ---- Startup Info ---- */
+void WINAPI GetStartupInfoA(STARTUPINFOA* si){
+  if (!si) return;
+  memset(si, 0, sizeof(*si));
+  si->cb = sizeof(*si);
+  si->hStdInput  = (HANDLE)(uintptr_t)STD_INPUT_HANDLE;
+  si->hStdOutput = (HANDLE)(uintptr_t)STD_OUTPUT_HANDLE;
+  si->hStdError  = (HANDLE)(uintptr_t)STD_ERROR_HANDLE;
+}
+void WINAPI GetStartupInfoW(STARTUPINFOW* si){
+  if (!si) return;
+  memset(si, 0, sizeof(*si));
+  si->cb = sizeof(*si);
+  si->hStdInput  = (HANDLE)(uintptr_t)STD_INPUT_HANDLE;
+  si->hStdOutput = (HANDLE)(uintptr_t)STD_OUTPUT_HANDLE;
+  si->hStdError  = (HANDLE)(uintptr_t)STD_ERROR_HANDLE;
+}
 
 /* ---- 命令列 ---- */
 static char  g_cmdlineA[512] = "AwAProcess";
@@ -93,44 +139,42 @@ static size_t a2w(const char* a, WCHAR* w, size_t cap){
   size_t i=0; for (; a && *a && i+1<cap; ++a,++i) w[i] = (unsigned char)(*a);
   if (w && cap) w[i] = 0; return i;
 }
-
 __attribute__((visibility("default"))) void nt_set_command_lineA(const char* s){
   if (!s) return; size_t L = strlen(s); if (L >= sizeof(g_cmdlineA)) L = sizeof(g_cmdlineA)-1;
   memcpy(g_cmdlineA, s, L); g_cmdlineA[L] = 0; a2w(g_cmdlineA, g_cmdlineW, sizeof(g_cmdlineW)/sizeof(g_cmdlineW[0]));
 }
-
 LPCSTR  WINAPI GetCommandLineA(void){ return g_cmdlineA; }
 LPCWSTR WINAPI GetCommandLineW(void){ return g_cmdlineW; }
 
-/* ---- 模組/符號查詢 ---- */
+/* ---- 模組/符號 ---- */
 static HMODULE g_kernel32 = (HMODULE)(uintptr_t)1;
 static int ieq(const char* a, const char* b){
   for (; *a && *b; ++a,++b){ int ca = (*a>='A'&&*a<='Z') ? (*a+32) : (unsigned char)*a; int cb = (*b>='A'&&*b<='Z') ? (*b+32) : (unsigned char)*b; if (ca!=cb) return 0; }
   return *a==0 && *b==0;
 }
-
 HMODULE WINAPI GetModuleHandleA(LPCSTR name){
   if (!name || !*name) return g_kernel32;
   char buf[64]; size_t j=0;
   for (size_t i=0; name[i] && j+1<sizeof(buf); ++i){ char c = name[i]; if (c>='A'&&c<='Z') c=(char)(c+32); buf[j++]=c; }
   buf[j]=0; size_t L=strlen(buf);
-  if (L>=4 && buf[L-4]=='.'&&buf[L-3]=='d'&&buf[L-2]=='l'&&buf[L-1]=='l') buf[L-4]=0;
+  if (L>=4 && buf[L-4]=='.'&&buf[L-3]=='d'&&buf[L-2]=='l'&&buf[L-1]=='.') buf[L-4]=0;
   if (ieq(buf,"kernel32")) return g_kernel32;
   return NULL;
 }
-
 HMODULE WINAPI GetModuleHandleW(LPCWSTR name){
   if (!name) return g_kernel32; char tmp[64]; size_t i=0; for (; name[i] && i+1<sizeof(tmp); ++i) tmp[i] = (char)(name[i] & 0xFF); tmp[i]=0;
   return GetModuleHandleA(tmp);
 }
 
+/* 與 loader 共享的 Hook 表 */
+extern struct Hook NT_HOOKS[];
 FARPROC WINAPI GetProcAddress(HMODULE h, LPCSTR name){
   if (!h || !name) return NULL;
   for (struct Hook* p=NT_HOOKS; p && p->dll; ++p){ if (strcmp(p->name, name)==0) return (FARPROC)p->fn; }
-  /* 去掉前綴底線與 @N（stdcall 裝飾） */
+  /* 去除 _ 與 @N（stdcall 裝飾） */
   char clean[128]; size_t i=0,j=0; if (name[0]=='_') ++i;
   for (; name[i] && j+1<sizeof(clean); ++i){
-    if (name[i]=='@'){ size_t k=i+1; int all_digit=1; while (name[k]){ if (!isdigit((unsigned char)name[k])){ all_digit=0; break; } ++k; } if (all_digit) break; }
+    if (name[i]=='@'){ size_t k=i+1; int all=1; while (name[k]){ if (!isdigit((unsigned char)name[k])){ all=0; break; } ++k; } if (all) break; }
     clean[j++] = name[i];
   }
   clean[j]=0;
@@ -139,28 +183,26 @@ FARPROC WINAPI GetProcAddress(HMODULE h, LPCSTR name){
   return NULL;
 }
 
-/* ---- Process：CreateProcess / Wait / ExitCode / Close ---- */
+/* ---- CreateProcess / Wait / ExitCode / Close ---- */
+static void ms_sleep(unsigned ms){ struct timespec ts; ts.tv_sec=ms/1000; ts.tv_nsec=(long)(ms%1000)*1000000L; nanosleep(&ts,NULL); }
+
 static const char* pick_loader(void){
   if (access("/usr/lib/awaos/pe_loader32", X_OK) == 0) return "/usr/lib/awaos/pe_loader32";
   if (access("/usr/local/lib/awaos/pe_loader32", X_OK) == 0) return "/usr/local/lib/awaos/pe_loader32";
   return NULL;
 }
-
 static int split_args(char* s, char** outv, int maxv){
-  int n=0; while (s && *s && n < maxv-1){ while (*s==' ' || *s=='\t') ++s; if (!*s) break; outv[n++] = s; while (*s && *s!=' ' && *s!='\t') ++s; if (*s) *s++ = '\0'; }
+  int n=0; while (s && *s && n < maxv-1){ while (*s==' ' || *s=='\t') ++s; if (!*s) break; outv[n++]=s; while (*s && *s!=' ' && *s!='\t') ++s; if (*s) *s++='\0'; }
   outv[n]=NULL; return n;
 }
-
-static pid_t g_last_pid = -1; static int g_last_status = 0;
+static pid_t g_last_pid=-1; static int g_last_status=0;
 
 BOOL WINAPI CreateProcessA(LPCSTR appName, LPSTR cmdLine, LPVOID a, LPVOID b, BOOL inh, DWORD flags, LPVOID env, LPCSTR curdir, STARTUPINFOA* si, PROCESS_INFORMATION* pi){
-  (void)a; (void)b; (void)inh; (void)flags; (void)env; (void)si;
-  const char* loader = pick_loader(); if (!loader) return FALSE; if (!appName || !*appName) return FALSE;
-
+  (void)a;(void)b;(void)inh;(void)flags;(void)env;(void)si;
+  const char* loader = pick_loader(); if (!loader || !appName || !*appName) return FALSE;
   char* args_buf=NULL; char* argv[64]; int ai=0; argv[ai++]=(char*)loader; argv[ai++]=(char*)appName;
   if (cmdLine && *cmdLine){ size_t L=strlen(cmdLine); args_buf=(char*)malloc(L+1); if(!args_buf) return FALSE; memcpy(args_buf,cmdLine,L+1); ai += split_args(args_buf,&argv[ai],(int)(64-ai)); }
   argv[ai]=NULL;
-
   pid_t pid=fork(); if(pid<0){ if(args_buf) free(args_buf); return FALSE; }
   if(pid==0){ if (curdir && *curdir) chdir(curdir); execv(loader, argv); _exit(127); }
   if(args_buf) free(args_buf);
@@ -201,6 +243,7 @@ BOOL WINAPI CloseHandle(HANDLE h){ if (_nt_is_thread_handle(h)) return _nt_close
 __attribute__((visibility("default")))
 struct Hook NT_HOOKS[] = {
   {"KERNEL32.DLL","GetStdHandle",        (void*)GetStdHandle},
+  {"KERNEL32.DLL","SetStdHandle",        (void*)SetStdHandle},
   {"KERNEL32.DLL","WriteFile",           (void*)WriteFile},
   {"KERNEL32.DLL","ReadFile",            (void*)ReadFile},
   {"KERNEL32.DLL","WriteConsoleA",       (void*)WriteConsoleA},
@@ -209,6 +252,8 @@ struct Hook NT_HOOKS[] = {
   {"KERNEL32.DLL","GetFileType",         (void*)GetFileType},
   {"KERNEL32.DLL","GetConsoleMode",      (void*)GetConsoleMode},
   {"KERNEL32.DLL","SetConsoleMode",      (void*)SetConsoleMode},
+  {"KERNEL32.DLL","GetStartupInfoA",     (void*)GetStartupInfoA},
+  {"KERNEL32.DLL","GetStartupInfoW",     (void*)GetStartupInfoW},
   {"KERNEL32.DLL","ExitProcess",         (void*)ExitProcess},
 
   {"KERNEL32.DLL","CreateProcessA",      (void*)CreateProcessA},
@@ -222,7 +267,7 @@ struct Hook NT_HOOKS[] = {
   {"KERNEL32.DLL","GetModuleHandleW",    (void*)GetModuleHandleW},
   {"KERNEL32.DLL","GetProcAddress",      (void*)GetProcAddress},
 
-  /* Threads & TLS */
+  /* Threads & TLS（由 ntdll32 提供） */
   {"KERNEL32.DLL","CreateThread",        (void*)CreateThread},
   {"KERNEL32.DLL","ExitThread",          (void*)ExitThread},
   {"KERNEL32.DLL","Sleep",               (void*)Sleep},
