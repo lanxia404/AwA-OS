@@ -2,7 +2,6 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* --- WINAPI 呼叫約定（i386 使用 stdcall，其餘平台忽略） --- */
 #ifndef WINAPI
 # if defined(__i386__)
 #  define WINAPI __attribute__((stdcall))
@@ -11,57 +10,41 @@
 # endif
 #endif
 
-/* --- 基本 Windows 風格型別 --- */
-typedef uint32_t DWORD;
-typedef int32_t  BOOL;
-typedef uint16_t WORD;
-typedef unsigned char BYTE;
-typedef void*    HANDLE;
-typedef void*    HMODULE;
-typedef void*    FARPROC;
-
+typedef uint32_t DWORD; typedef int32_t BOOL; typedef uint16_t WORD; typedef unsigned char BYTE;
+typedef void* HANDLE; typedef void* HMODULE; typedef void* FARPROC;
 #ifndef TRUE
 # define TRUE 1
 #endif
 #ifndef FALSE
 # define FALSE 0
 #endif
-
 #ifndef LPVOID
-typedef void*   LPVOID;
+typedef void* LPVOID;
 #endif
 #ifndef LPDWORD
-typedef DWORD*  LPDWORD;
+typedef DWORD* LPDWORD;
 #endif
 #ifndef LPBYTE
-typedef BYTE*   LPBYTE;
+typedef BYTE* LPBYTE;
 #endif
 #ifndef LPCVOID
 typedef const void* LPCVOID;
 #endif
-
-typedef char*       LPSTR;
-typedef const char* LPCSTR;
-typedef unsigned short WCHAR;
-typedef WCHAR*       LPWSTR;
-typedef const WCHAR* LPCWSTR;
-
+typedef char* LPSTR; typedef const char* LPCSTR;
+typedef unsigned short WCHAR; typedef WCHAR* LPWSTR; typedef const WCHAR* LPCWSTR;
 #ifndef SIZE_T
 # define SIZE_T size_t
 #endif
-
 #ifndef UINT
 typedef unsigned int UINT;
 #endif
 
-/* --- 標準 Handle 常數 --- */
 #ifndef STD_INPUT_HANDLE
 # define STD_INPUT_HANDLE  ((DWORD)-10)
 # define STD_OUTPUT_HANDLE ((DWORD)-11)
 # define STD_ERROR_HANDLE  ((DWORD)-12)
 #endif
 
-/* --- 等待/程序常數 --- */
 #ifndef INFINITE
 # define INFINITE 0xFFFFFFFFu
 #endif
@@ -78,7 +61,6 @@ typedef unsigned int UINT;
 # define STILL_ACTIVE 259u
 #endif
 
-/* --- 檔案型別常數（給 GetFileType 用） --- */
 #ifndef FILE_TYPE_UNKNOWN
 # define FILE_TYPE_UNKNOWN 0x0000
 # define FILE_TYPE_DISK    0x0001
@@ -86,60 +68,42 @@ typedef unsigned int UINT;
 # define FILE_TYPE_PIPE    0x0003
 #endif
 
-/* --- 最小 STARTUPINFO / PROCESS_INFORMATION 定義 --- */
 typedef struct _STARTUPINFOA {
-  DWORD cb;
-  LPSTR lpReserved;
-  LPSTR lpDesktop;
-  LPSTR lpTitle;
+  DWORD cb; LPSTR lpReserved, lpDesktop, lpTitle;
   DWORD dwX, dwY, dwXSize, dwYSize;
-  DWORD dwXCountChars, dwYCountChars, dwFillAttribute;
-  DWORD dwFlags;
-  WORD  wShowWindow;
-  WORD  cbReserved2;
-  LPBYTE lpReserved2;
-  HANDLE hStdInput;
-  HANDLE hStdOutput;
-  HANDLE hStdError;
+  DWORD dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+  WORD wShowWindow, cbReserved2; LPBYTE lpReserved2;
+  HANDLE hStdInput, hStdOutput, hStdError;
 } STARTUPINFOA;
 
 typedef struct _STARTUPINFOW {
-  DWORD cb;
-  LPWSTR lpReserved;
-  LPWSTR lpDesktop;
-  LPWSTR lpTitle;
+  DWORD cb; LPWSTR lpReserved, lpDesktop, lpTitle;
   DWORD dwX, dwY, dwXSize, dwYSize;
-  DWORD dwXCountChars, dwYCountChars, dwFillAttribute;
-  DWORD dwFlags;
-  WORD  wShowWindow;
-  WORD  cbReserved2;
-  LPBYTE lpReserved2;
-  HANDLE hStdInput;
-  HANDLE hStdOutput;
-  HANDLE hStdError;
+  DWORD dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+  WORD wShowWindow, cbReserved2; LPBYTE lpReserved2;
+  HANDLE hStdInput, hStdOutput, hStdError;
 } STARTUPINFOW;
 
 typedef struct _PROCESS_INFORMATION {
-  HANDLE hProcess;
-  HANDLE hThread;
-  DWORD  dwProcessId;
-  DWORD  dwThreadId;
+  HANDLE hProcess, hThread; DWORD dwProcessId, dwThreadId;
 } PROCESS_INFORMATION;
 
-/* --- KERNEL32 原型：I/O/程序 --- */
+/* KERNEL32 */
 HANDLE WINAPI GetStdHandle(DWORD nStdHandle);
+BOOL   WINAPI SetStdHandle(DWORD nStdHandle, HANDLE h);
 BOOL   WINAPI ReadFile(HANDLE, LPVOID, DWORD, LPDWORD, LPVOID);
 BOOL   WINAPI WriteFile(HANDLE, LPCVOID, DWORD, LPDWORD, LPVOID);
 __attribute__((noreturn)) void WINAPI ExitProcess(UINT);
 
-/* Console I/O（簡化） */
 BOOL   WINAPI WriteConsoleA(HANDLE, const char*, DWORD, LPDWORD, LPVOID);
-BOOL   WINAPI ReadConsoleA(HANDLE, char*, DWORD, LPDWORD, LPVOID);
+BOOL   WINAPI ReadConsoleA (HANDLE, char*,       DWORD, LPDWORD, LPVOID);
 
-BOOL   WINAPI FlushFileBuffers(HANDLE hFile);
-DWORD  WINAPI GetFileType(HANDLE hFile);
-BOOL   WINAPI GetConsoleMode(HANDLE hConsole, LPDWORD mode);
-BOOL   WINAPI SetConsoleMode(HANDLE hConsole, DWORD mode);
+BOOL   WINAPI FlushFileBuffers(HANDLE);
+DWORD  WINAPI GetFileType(HANDLE);
+BOOL   WINAPI GetConsoleMode(HANDLE, LPDWORD);
+BOOL   WINAPI SetConsoleMode(HANDLE, DWORD);
+void   WINAPI GetStartupInfoA(STARTUPINFOA*);
+void   WINAPI GetStartupInfoW(STARTUPINFOW*);
 
 BOOL   WINAPI CreateProcessA(LPCSTR, LPSTR, LPVOID, LPVOID, BOOL, DWORD, LPVOID, LPCSTR, STARTUPINFOA*, PROCESS_INFORMATION*);
 BOOL   WINAPI CreateProcessW(LPCWSTR, LPWSTR, LPVOID, LPVOID, BOOL, DWORD, LPVOID, LPCWSTR, STARTUPINFOW*, PROCESS_INFORMATION*);
@@ -151,14 +115,12 @@ BOOL   WINAPI CloseHandle(HANDLE);
 LPCSTR  WINAPI GetCommandLineA(void);
 LPCWSTR WINAPI GetCommandLineW(void);
 
-/* 模組/符號載入 */
-HMODULE WINAPI GetModuleHandleA(LPCSTR name);
-HMODULE WINAPI GetModuleHandleW(LPCWSTR name);
-FARPROC WINAPI GetProcAddress(HMODULE h, LPCSTR name);
+HMODULE WINAPI GetModuleHandleA(LPCSTR);
+HMODULE WINAPI GetModuleHandleW(LPCWSTR);
+FARPROC WINAPI GetProcAddress(HMODULE, LPCSTR);
 
-/* --- Threads & TLS --- */
-typedef DWORD (WINAPI *LPTHREAD_START_ROUTINE)(LPVOID lpParameter);
-
+/* Threads & TLS（由 ntdll32 實作） */
+typedef DWORD (WINAPI *LPTHREAD_START_ROUTINE)(LPVOID);
 HANDLE WINAPI CreateThread(LPVOID, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD);
 void   WINAPI ExitThread(DWORD);
 DWORD  WINAPI GetCurrentThreadId(void);
@@ -169,6 +131,5 @@ BOOL   WINAPI TlsFree(DWORD);
 BOOL   WINAPI TlsSetValue(DWORD, LPVOID);
 LPVOID WINAPI TlsGetValue(DWORD);
 
-/* LastError */
 DWORD WINAPI GetLastError(void);
-void  WINAPI SetLastError(DWORD e);
+void  WINAPI SetLastError(DWORD);
