@@ -18,6 +18,15 @@ int   _nt_wait_thread(HANDLE h, DWORD ms);
 DWORD _nt_get_thread_exit_code(HANDLE h);
 BOOL  _nt_close_thread(HANDLE h);
 
+/* ---- 可選除錯輸出（設 AWAOS_LOG=1 啟用） ---- */
+static int _log_enabled = 0;
+__attribute__((constructor))
+static void _init_log(void){
+  const char* e = getenv("AWAOS_LOG");
+  _log_enabled = (e && *e && strcmp(e,"0")!=0) ? 1 : 0;
+}
+#define LOGF(...) do{ if(_log_enabled){ fprintf(stderr,"[ntshim32] " __VA_ARGS__); fputc('\n',stderr);} }while(0)
+
 /* --- 工具 --- */
 static void ms_sleep(unsigned ms){
   struct timespec ts;
@@ -60,34 +69,37 @@ BOOL WINAPI ReadFile(HANDLE h, LPVOID buf, DWORD toRead, LPDWORD out, LPVOID ove
   return TRUE;
 }
 
-__attribute__((noreturn)) void WINAPI ExitProcess(UINT code) {
-  _exit((int)code);
+/* Console A 版做薄封裝到 File */
+BOOL WINAPI WriteConsoleA(HANDLE h, const char* buf, DWORD len, LPDWORD written, LPVOID ovl){
+  return WriteFile(h, buf, len, written, ovl);
 }
-
-/* ---- GetFileType / Console 模式（極簡） ---- */
-DWORD WINAPI GetFileType(HANDLE hFile){
-  int fd = map_handle((DWORD)(uintptr_t)hFile);
-  if (fd >= 0 && fd <= 2) return FILE_TYPE_CHAR;
-  /* 其他情況先當作磁碟檔即可（簡化） */
-  return FILE_TYPE_DISK;
-}
-
-BOOL WINAPI GetConsoleMode(HANDLE h, LPDWORD mode){
-  if (mode) *mode = 0; /* 簡化回報為 0（不支援任何特殊旗標） */
-  return TRUE;
-}
-
-BOOL WINAPI SetConsoleMode(HANDLE h, DWORD mode){
-  (void)h; (void)mode;
-  return TRUE; /* 接受但實際不做事 */
+BOOL WINAPI ReadConsoleA(HANDLE h, char* buf, DWORD toRead, LPDWORD out, LPVOID ovl){
+  return ReadFile(h, buf, toRead, out, ovl);
 }
 
 BOOL WINAPI FlushFileBuffers(HANDLE h){
   int fd = map_handle((DWORD)(uintptr_t)h);
   if (fd < 0) return FALSE;
-  /* 對 stdout/stderr 就不 fsync，直接視為成功；stdin 返回成功亦無害 */
   if (fd > 2) (void)fsync(fd);
   return TRUE;
+}
+
+DWORD WINAPI GetFileType(HANDLE hFile){
+  int fd = map_handle((DWORD)(uintptr_t)hFile);
+  if (fd >= 0 && fd <= 2) return FILE_TYPE_CHAR;
+  return FILE_TYPE_DISK;
+}
+
+BOOL WINAPI GetConsoleMode(HANDLE h, LPDWORD mode){
+  if (mode) *mode = 0; /* 不支援任何特殊旗標，回 0 即可通過大多數檢查 */
+  return TRUE;
+}
+BOOL WINAPI SetConsoleMode(HANDLE h, DWORD mode){
+  (void)h; (void)mode; return TRUE;
+}
+
+__attribute__((noreturn)) void WINAPI ExitProcess(UINT code) {
+  _exit((int)code);
 }
 
 /* ---- 命令列 ---- */
@@ -113,8 +125,7 @@ void nt_set_command_lineA(const char* s) {
 LPCSTR  WINAPI GetCommandLineA(void) { return g_cmdlineA; }
 LPCWSTR WINAPI GetCommandLineW(void) { return g_cmdlineW; }
 
-/* ---- 簡易 KERNEL32 模組/符號查詢 ---- */
-/* 我們用假的 HMODULE（常量 1）代表 kernel32，本質是從 NT_HOOKS 查 */
+/* ---- 模組/符號查詢 ---- */
 static HMODULE g_kernel32 = (HMODULE)(uintptr_t)1;
 
 static int ieq(const char* a, const char* b){
@@ -128,7 +139,6 @@ static int ieq(const char* a, const char* b){
 
 HMODULE WINAPI GetModuleHandleA(LPCSTR name){
   if (!name || !*name) return g_kernel32;
-  /* 規範化：去 .dll、忽略大小寫 */
   char buf[64]; size_t j=0;
   for (size_t i=0; name[i] && j+1<sizeof(buf); ++i){
     char c = name[i];
@@ -139,8 +149,15 @@ HMODULE WINAPI GetModuleHandleA(LPCSTR name){
   size_t L=strlen(buf);
   if (L>=4 && buf[L-4]=='.'&&buf[L-3]=='d'&&buf[L-2]=='l'&&buf[L-1]=='l') buf[L-4]=0;
   if (ieq(buf,"kernel32")) return g_kernel32;
-  /* 目前只支援 kernel32，其他回 NULL */
   return NULL;
+}
+
+HMODULE WINAPI GetModuleHandleW(LPCWSTR name){
+  if (!name) return g_kernel32;
+  char tmp[64]; size_t i=0;
+  for (; name[i] && i+1<sizeof(tmp); ++i) tmp[i] = (char)(name[i] & 0xFF);
+  tmp[i]=0;
+  return GetModuleHandleA(tmp);
 }
 
 FARPROC WINAPI GetProcAddress(HMODULE h, LPCSTR name){
@@ -164,6 +181,7 @@ FARPROC WINAPI GetProcAddress(HMODULE h, LPCSTR name){
   for (struct Hook* p=NT_HOOKS; p && p->dll; ++p){
     if (strcmp(p->name, clean)==0) return (FARPROC)p->fn;
   }
+  LOGF("GetProcAddress miss: \"%s\" (clean=\"%s\")", name, clean);
   return NULL;
 }
 
@@ -317,12 +335,13 @@ struct Hook NT_HOOKS[] = {
   {"KERNEL32.DLL","GetStdHandle",        (void*)GetStdHandle},
   {"KERNEL32.DLL","WriteFile",           (void*)WriteFile},
   {"KERNEL32.DLL","ReadFile",            (void*)ReadFile},
-  {"KERNEL32.DLL","ExitProcess",         (void*)ExitProcess},
-
+  {"KERNEL32.DLL","WriteConsoleA",       (void*)WriteConsoleA},
+  {"KERNEL32.DLL","ReadConsoleA",        (void*)ReadConsoleA},
+  {"KERNEL32.DLL","FlushFileBuffers",    (void*)FlushFileBuffers},
   {"KERNEL32.DLL","GetFileType",         (void*)GetFileType},
   {"KERNEL32.DLL","GetConsoleMode",      (void*)GetConsoleMode},
   {"KERNEL32.DLL","SetConsoleMode",      (void*)SetConsoleMode},
-  {"KERNEL32.DLL","FlushFileBuffers",    (void*)FlushFileBuffers},
+  {"KERNEL32.DLL","ExitProcess",         (void*)ExitProcess},
 
   {"KERNEL32.DLL","CreateProcessA",      (void*)CreateProcessA},
   {"KERNEL32.DLL","CreateProcessW",      (void*)CreateProcessW},
@@ -332,9 +351,10 @@ struct Hook NT_HOOKS[] = {
   {"KERNEL32.DLL","GetCommandLineA",     (void*)GetCommandLineA},
   {"KERNEL32.DLL","GetCommandLineW",     (void*)GetCommandLineW},
   {"KERNEL32.DLL","GetModuleHandleA",    (void*)GetModuleHandleA},
+  {"KERNEL32.DLL","GetModuleHandleW",    (void*)GetModuleHandleW},
   {"KERNEL32.DLL","GetProcAddress",      (void*)GetProcAddress},
 
-  /* Threads & TLS */
+  /* Threads & TLS（由 ntdll32 提供實作） */
   {"KERNEL32.DLL","CreateThread",        (void*)CreateThread},
   {"KERNEL32.DLL","ExitThread",          (void*)ExitThread},
   {"KERNEL32.DLL","Sleep",               (void*)Sleep},
