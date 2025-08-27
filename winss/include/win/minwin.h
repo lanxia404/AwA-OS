@@ -1,79 +1,52 @@
-// winss/include/win/minwin.h
 #pragma once
+/* Minimal Win32 subset for AwA-OS build (i386) */
 
 #include <stdint.h>
 #include <stddef.h>
 
-/* --- calling convention -------------------------------------------------- */
-#if defined(__i386__) || defined(_M_IX86)
+#ifndef WINAPI
 #  define WINAPI __attribute__((stdcall))
-#else
-#  define WINAPI
 #endif
 
-/* --- base types ---------------------------------------------------------- */
-typedef void                VOID;
-typedef uint8_t             BYTE, *PBYTE, *LPBYTE;
-typedef uint16_t            WORD, *PWORD, *LPWORD;
-typedef uint32_t            DWORD, *PDWORD, *LPDWORD;
-typedef int32_t             BOOL;
-typedef uintptr_t           SIZE_T;
+/* ----- 基本型別 ----- */
+#ifndef VOID
+#  define VOID void
+#endif
 
-typedef void*               HANDLE;
-typedef void*               LPVOID;
-typedef const void*         LPCVOID;
+typedef uint8_t   BYTE;
+typedef uint16_t  WORD;
+typedef uint32_t  DWORD;
+typedef unsigned  UINT;
+typedef int       BOOL;
 
-typedef char*               LPSTR;
-typedef const char*         LPCSTR;
+typedef void*       HANDLE;
+typedef void*       LPVOID;
+typedef const void* LPCVOID;
 
-typedef wchar_t             WCHAR, *PWCHAR, *LPWSTR;
-typedef const wchar_t*      LPCWSTR;
+typedef BYTE*    LPBYTE;
+typedef DWORD*   LPDWORD;
+typedef uintptr_t SIZE_T;
 
 #ifndef TRUE
 #  define TRUE  1
+#endif
+#ifndef FALSE
 #  define FALSE 0
 #endif
 
-#ifndef NULL
-#  define NULL ((void*)0)
-#endif
+/* ----- 常數 ----- */
+#define STD_INPUT_HANDLE   ((DWORD)-10)
+#define STD_OUTPUT_HANDLE  ((DWORD)-11)
+#define STD_ERROR_HANDLE   ((DWORD)-12)
 
-#define INVALID_HANDLE_VALUE ((HANDLE)(intptr_t)-1)
+#define INFINITE  0xFFFFFFFFu
 
-/* --- useful constants ---------------------------------------------------- */
-#ifndef INFINITE
-#  define INFINITE 0xFFFFFFFFu
-#endif
-#ifndef WAIT_FAILED
-#  define WAIT_FAILED 0xFFFFFFFFu
-#endif
-#ifndef WAIT_OBJECT_0
-#  define WAIT_OBJECT_0 0x00000000u
-#endif
-
-/* standard handle ids (used by some sample code) */
-#ifndef STD_INPUT_HANDLE
-#  define STD_INPUT_HANDLE  ((DWORD)-10)
-#  define STD_OUTPUT_HANDLE ((DWORD)-11)
-#  define STD_ERROR_HANDLE  ((DWORD)-12)
-#endif
-
-/* --- structs ------------------------------------------------------------- */
+/* ----- 結構 ----- */
 typedef struct _SECURITY_ATTRIBUTES {
   DWORD  nLength;
   LPVOID lpSecurityDescriptor;
   BOOL   bInheritHandle;
-} SECURITY_ATTRIBUTES, *PSECURITY_ATTRIBUTES, *LPSECURITY_ATTRIBUTES;
-
-typedef DWORD (WINAPI *LPTHREAD_START_ROUTINE)(LPVOID);
-typedef LPTHREAD_START_ROUTINE PTHREAD_START_ROUTINE;
-
-typedef struct _PROCESS_INFORMATION {
-  HANDLE hProcess;
-  HANDLE hThread;
-  DWORD  dwProcessId;
-  DWORD  dwThreadId;
-} PROCESS_INFORMATION, *PPROCESS_INFORMATION, *LPPROCESS_INFORMATION;
+} SECURITY_ATTRIBUTES, *LPSECURITY_ATTRIBUTES;
 
 typedef struct _STARTUPINFOA {
   DWORD  cb;
@@ -90,54 +63,72 @@ typedef struct _STARTUPINFOA {
   DWORD  dwFlags;
   WORD   wShowWindow;
   WORD   cbReserved2;
-  LPBYTE lpReserved2;
+  LPBYTE lpReserved2;   /* 先前編譯錯就卡在這個型別 */
   HANDLE hStdInput;
   HANDLE hStdOutput;
   HANDLE hStdError;
 } STARTUPINFOA, *LPSTARTUPINFOA;
 
-/* --- kernel32-style APIs we reference ----------------------------------- */
-#ifdef __cplusplus
-extern "C" {
-#endif
+typedef struct _PROCESS_INFORMATION {
+  HANDLE hProcess;
+  HANDLE hThread;
+  DWORD  dwProcessId;
+  DWORD  dwThreadId;
+} PROCESS_INFORMATION, *LPPROCESS_INFORMATION;
 
-VOID   WINAPI ExitProcess(DWORD);
-BOOL   WINAPI CloseHandle(HANDLE);
-VOID   WINAPI GetStartupInfoA(LPSTARTUPINFOA);
-LPCSTR WINAPI GetCommandLineA(void);
+/* 執行緒起始函式型別（Win32） */
+typedef DWORD (WINAPI *LPTHREAD_START_ROUTINE)(LPVOID);
 
-BOOL   WINAPI CreateProcessA(
-  LPCSTR                lpApplicationName,
-  LPSTR                 lpCommandLine,          /* 可為 NULL */
-  LPSECURITY_ATTRIBUTES lpProcessAttributes,    /* 可為 NULL */
-  LPSECURITY_ATTRIBUTES lpThreadAttributes,     /* 可為 NULL */
-  BOOL                  bInheritHandles,
-  DWORD                 dwCreationFlags,
-  LPVOID                lpEnvironment,          /* 可為 NULL */
-  LPCSTR                lpCurrentDirectory,     /* 可為 NULL */
-  LPSTARTUPINFOA        lpStartupInfo,
+/* ----- KERNEL32 匯入 API（宣告） ----- */
+/* error handling */
+VOID  WINAPI SetLastError(DWORD dwErrCode);
+DWORD WINAPI GetLastError(void);
+
+/* process & cmdline */
+VOID  WINAPI ExitProcess(UINT uExitCode);
+VOID  WINAPI GetStartupInfoA(LPSTARTUPINFOA psi);
+BOOL  WINAPI CreateProcessA(
+  LPCSTR lpApplicationName,
+  LPSTR  lpCommandLine,
+  LPSECURITY_ATTRIBUTES lpProcessAttributes,
+  LPSECURITY_ATTRIBUTES lpThreadAttributes,
+  BOOL bInheritHandles,
+  DWORD dwCreationFlags,
+  LPVOID lpEnvironment,
+  LPCSTR lpCurrentDirectory,
+  LPSTARTUPINFOA lpStartupInfo,
   LPPROCESS_INFORMATION lpProcessInformation
 );
+DWORD WINAPI WaitForSingleObject(HANDLE hHandle, DWORD dwMilliseconds);
+BOOL  WINAPI GetExitCodeProcess(HANDLE hProcess, LPDWORD lpExitCode);
+BOOL  WINAPI CloseHandle(HANDLE hObject);
+LPCSTR WINAPI GetCommandLineA(void);
 
-DWORD  WINAPI WaitForSingleObject(HANDLE, DWORD);
-BOOL   WINAPI GetExitCodeProcess(HANDLE, LPDWORD);
+/* std handles & I/O */
+HANDLE WINAPI GetStdHandle(DWORD nStdHandle);
+BOOL   WINAPI ReadFile(HANDLE hFile, LPVOID lpBuffer, DWORD nNumberOfBytesToRead,
+                       LPDWORD lpNumberOfBytesRead, LPVOID lpOverlapped);
+BOOL   WINAPI WriteFile(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite,
+                        LPDWORD lpNumberOfBytesWritten, LPVOID lpOverlapped);
 
-/* I/O */
-BOOL   WINAPI ReadFile (HANDLE, LPVOID,  DWORD, LPDWORD, LPVOID);
-BOOL   WINAPI WriteFile(HANDLE, LPCVOID, DWORD, LPDWORD, LPVOID);
+/* threads & TLS */
+HANDLE WINAPI CreateThread(LPSECURITY_ATTRIBUTES lpThreadAttributes,
+                           SIZE_T dwStackSize,
+                           LPTHREAD_START_ROUTINE lpStartAddress,
+                           LPVOID lpParameter,
+                           DWORD dwCreationFlags,
+                           LPDWORD lpThreadId);
+VOID   WINAPI ExitThread(DWORD dwExitCode);
+VOID   WINAPI Sleep(DWORD dwMilliseconds);
+DWORD  WINAPI GetCurrentThreadId(void);
 
-/* TLS / threads (provided by our shim) */
 DWORD  WINAPI TlsAlloc(void);
-BOOL   WINAPI TlsFree(DWORD);
-LPVOID WINAPI TlsGetValue(DWORD);
-BOOL   WINAPI TlsSetValue(DWORD, LPVOID);
+BOOL   WINAPI TlsFree(DWORD dwTlsIndex);
+LPVOID WINAPI TlsGetValue(DWORD dwTlsIndex);
+BOOL   WINAPI TlsSetValue(DWORD dwTlsIndex, LPVOID lpTlsValue);
 
-HANDLE WINAPI CreateThread(LPSECURITY_ATTRIBUTES, SIZE_T,
-                           LPTHREAD_START_ROUTINE, LPVOID,
-                           DWORD, LPDWORD);
-VOID   WINAPI ExitThread(DWORD);
-VOID   WINAPI Sleep(DWORD);
-
-#ifdef __cplusplus
-}
+/* ----- 方便的別名（C-only）：LPCSTR/LPSTR ----- */
+#ifndef _INC_WINDOWS_LPCSTR
+typedef const char* LPCSTR;
+typedef char*       LPSTR;
 #endif
