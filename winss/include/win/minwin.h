@@ -32,7 +32,8 @@ typedef char*        LPSTR;
 typedef const char*  LPCSTR;
 typedef DWORD*       LPDWORD;
 /* ★ 修補：補上 LPBYTE（Win32: typedef unsigned char BYTE, *LPBYTE;） */
-typedef BYTE*        LPBYTE;
+typedef unsigned char BYTE;
+typedef BYTE* LPBYTE;   // <--- 新增，供 STARTUPINFOA 使用
 
 /* ---- 呼叫慣例 ---- */
 #ifndef WINAPI
