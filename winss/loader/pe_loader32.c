@@ -102,12 +102,12 @@ static int ieq(const char* a, const char* b){
   return *a==0 && *b==0;
 }
 
-/* 去底線前綴 + 去 stdcall 尾端 @NN 裝飾，讓 "ReadFile@20" / "_ReadFile@20" 都能匹配 "ReadFile" */
+/* 去底線前綴 + 去 stdcall 尾端 @NN 裝飾 */
 static void undecorate(const char* in, char* out, size_t cap){
   size_t i=0, j=0;
-  if (in[0]=='_') ++i; /* 去掉 '_' 前綴（若有） */
+  if (in[0]=='_') ++i;
   for (; in[i] && j+1<cap; ++i){
-    if (in[i]=='@'){   /* 碰到 @ 數字就截斷 */
+    if (in[i]=='@'){
       size_t k=i+1; int all_digit=1;
       while (in[k]){ if (in[k]<'0'||in[k]>'9'){ all_digit=0; break; } ++k; }
       if (all_digit) break;
@@ -117,11 +117,37 @@ static void undecorate(const char* in, char* out, size_t cap){
   out[j]=0;
 }
 
+/* 規範化 DLL 名：轉小寫 + 去掉尾端 ".dll"（若有） */
+static void canon_dll(const char* in, char* out, size_t cap){
+  size_t j=0;
+  for (size_t i=0; in && in[i] && j+1<cap; ++i){
+    char c = in[i];
+    if (c>='A' && c<='Z') c = (char)(c+32);
+    out[j++] = c;
+  }
+  out[j]=0;
+  size_t L = strlen(out);
+  if (L>=4 && out[L-4]=='.' && out[L-3]=='d' && out[L-2]=='l' && out[L-1]=='l'){
+    out[L-4]=0; /* strip ".dll" */
+  }
+}
+
+/* 更魯棒的匯入解析：先只看函式名；不行再看 DLL+函式名 */
 static void* resolve_import(const char* dll, const char* sym){
   char clean[128]; undecorate(sym, clean, sizeof(clean));
+
+  /* 1) 名稱直配（忽略 DLL） */
   for (struct Hook* h=NT_HOOKS; h && h->dll; ++h){
-    if (ieq(h->dll, dll) && strcmp(h->name, clean)==0) return h->fn;
+    if (strcmp(h->name, clean)==0) return h->fn;
   }
+
+  /* 2) DLL + 名稱（兩邊 DLL 規範化後比較） */
+  char want[64]; canon_dll(dll, want, sizeof(want));
+  for (struct Hook* h=NT_HOOKS; h && h->dll; ++h){
+    char have[64]; canon_dll(h->dll, have, sizeof(have));
+    if (strcmp(have, want)==0 && strcmp(h->name, clean)==0) return h->fn;
+  }
+
   return NULL;
 }
 
