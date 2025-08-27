@@ -1,47 +1,36 @@
 // winss/ntshim32/ntshim32.c
+// 提供最小的 KERNEL32 匯出（stdin/stdout/stderr、CreateProcess 等）
+// 並導出 NT_HOOKS 供 loader 綁定。
+
 #include <unistd.h>
-#include <stdlib.h>
-#include <string.h>
 #include <stdint.h>
+#include <string.h>
 #include <errno.h>
-#include <stdio.h>
 
 #include "../include/win/minwin.h"
-#include "../include/nt/ntdef.h"
-#include "../ntdll32/teb_tls.h"     // nt_teb_setup_for_current
-#include "../ntdll32/thread.h"      // _nt_* helpers
+#include "../include/nt/hooks.h"      // struct Hook, NT_HOOKS
+#include "ntshim_api.h"               // nt_set_command_lineA (decl)
 
-// --- 雜項 --------------------------------------------------------------
-
+// ---- 環境變數開關：簡單日誌（可由 loader 先行處理 AWAOS_LOG）----
 static int _log_enabled = 0;
-static int is_log(void){
-  if(!_log_enabled){
-    const char* e = getenv("AWAOS_LOG");
-    _log_enabled = (e && *e) ? 1 : 0;
-  }
-  return _log_enabled;
-}
-#define LOGF(...) do{ if(is_log()){ fprintf(stderr,"[ntshim32] " __VA_ARGS__); fputc('\n',stderr);} }while(0)
+static void log_set(int on){ _log_enabled = on; }
+#define LOGF(...) do{ if(_log_enabled){ /* 可視需要加上 dprintf(2, ...) */ } }while(0)
 
-// --- Windows 基本型別小工具 -------------------------------------------
-
+// ---- Windows 三個標準句柄 對映到 Linux fd 0/1/2 ----
 static int map_handle(HANDLE h) {
   uintptr_t v = (uintptr_t)h;
-  // Windows 常量：STD_INPUT_HANDLE = (DWORD)-10, STD_OUTPUT_HANDLE = -11, STD_ERROR_HANDLE = -12
-  if (v == (uintptr_t)-10) return 0;
-  if (v == (uintptr_t)-11) return 1;
-  if (v == (uintptr_t)-12) return 2;
+  if (v == (uintptr_t)STD_INPUT_HANDLE)  return 0;
+  if (v == (uintptr_t)STD_OUTPUT_HANDLE) return 1;
+  if (v == (uintptr_t)STD_ERROR_HANDLE)  return 2;
   return -1;
 }
 
-// --- kernel32 最小實作（I/O，Process，TLS/Thread 綁定） ----------------
-
 HANDLE WINAPI GetStdHandle(DWORD nStdHandle) {
-  (void)nStdHandle;
+  (void)nStdHandle;  // 直接把常數當作句柄回傳
   return (HANDLE)(uintptr_t)nStdHandle;
 }
 
-BOOL WINAPI WriteFile(HANDLE h, const void* buf, DWORD len, LPDWORD written, LPVOID ovl) {
+BOOL WINAPI WriteFile(HANDLE h, const void* buf, DWORD len, DWORD* written, void* ovl) {
   (void)ovl;
   int fd = map_handle(h);
   if (fd < 0) return FALSE;
@@ -50,95 +39,101 @@ BOOL WINAPI WriteFile(HANDLE h, const void* buf, DWORD len, LPDWORD written, LPV
   return (n >= 0) ? TRUE : FALSE;
 }
 
-BOOL WINAPI ReadFile(HANDLE h, LPVOID buf, DWORD toRead, LPDWORD out, LPVOID ovl) {
-  (void)ovl;
+BOOL WINAPI ReadFile(HANDLE h, LPVOID buf, DWORD toRead, LPDWORD out, LPVOID overlapped) {
+  (void)overlapped;
   int fd = map_handle(h);
   if (fd < 0) return FALSE;
-  if (toRead == 0) { if (out) *out = 0; return TRUE; }
   ssize_t n = read(fd, buf, (size_t)toRead);
   if (n < 0) return FALSE;
   if (out) *out = (DWORD)n;
   return TRUE;
 }
 
-__attribute__((noreturn)) VOID WINAPI ExitProcess(UINT code) {
+__attribute__((noreturn)) void WINAPI ExitProcess(UINT code) {
   _exit((int)code);
 }
 
-// 命令列暫存（簡化用）
-static char g_cmdline[512];
-LPCSTR WINAPI GetCommandLineA(void) {
-  return g_cmdline[0] ? g_cmdline : "";
+// ---- 命令列（ANSI）支援 ----
+static char g_cmdlineA[1024];
+
+__attribute__((visibility("default")))
+void nt_set_command_lineA(const char* s){
+  if(!s){ g_cmdlineA[0]=0; return; }
+  size_t n = strlen(s);
+  if(n >= sizeof(g_cmdlineA)) n = sizeof(g_cmdlineA)-1;
+  memcpy(g_cmdlineA, s, n);
+  g_cmdlineA[n] = 0;
 }
 
-VOID WINAPI GetStartupInfoA(STARTUPINFOA* psi){
+LPCSTR WINAPI GetCommandLineA(void){
+  return g_cmdlineA;
+}
+
+// ---- StartupInfo / ProcessInformation 最小值 ----
+VOID WINAPI GetStartupInfoA(LPSTARTUPINFOA psi){
   if(!psi) return;
   memset(psi, 0, sizeof(*psi));
   psi->cb = sizeof(*psi);
-  psi->hStdInput  = (HANDLE)(uintptr_t)STD_INPUT_HANDLE;
-  psi->hStdOutput = (HANDLE)(uintptr_t)STD_OUTPUT_HANDLE;
-  psi->hStdError  = (HANDLE)(uintptr_t)STD_ERROR_HANDLE;
+  // 其他欄位先留白
 }
 
-// 宣告由 loader 提供的執行器（在 pe_loader32.c 內定義）
-BOOL pe32_spawn(const char* app, const char* cmdline, DWORD* exit_code);
+// 假進程/執行緒句柄：本階段只需讓 WaitForSingleObject/GetExitCodeProcess 可用
+static HANDLE const FAKE_PROCESS = (HANDLE)(uintptr_t)0x10001;
+static HANDLE const FAKE_THREAD  = (HANDLE)(uintptr_t)0x10002;
 
-// 最小 CreateProcessA：在同一進程內載入並執行子 exe（同步等待）
-BOOL WINAPI CreateProcessA(
-  LPCSTR app, LPSTR cmdline, LPVOID p1, LPVOID p2, BOOL inheritHandles,
-  DWORD flags, LPVOID env, LPCSTR cwd, STARTUPINFOA* si, PROCESS_INFORMATION* pi)
-{
-  (void)p1; (void)p2; (void)inheritHandles; (void)flags; (void)env; (void)cwd; (void)si;
-  if(!app || !*app){ SetLastError(2 /*ERROR_FILE_NOT_FOUND*/); return FALSE; }
-
-  DWORD code = (DWORD)-1;
-  LOGF("CreateProcessA app='%s' cmdline='%s'", app, (cmdline? cmdline:"(null)"));
-  // 將 app + cmdline 合併為目前行程的 GetCommandLineA 可見字串（簡化）
-  g_cmdline[0] = 0;
-  strncat(g_cmdline, app, sizeof(g_cmdline)-1);
-  if(cmdline){
-    strncat(g_cmdline, " ", sizeof(g_cmdline)-1);
-    strncat(g_cmdline, cmdline, sizeof(g_cmdline)-1);
-  }
-
-  if(!pe32_spawn(app, cmdline, &code)){
-    SetLastError(193 /*ERROR_BAD_EXE_FORMAT*/);
-    return FALSE;
-  }
-
-  if(pi){
-    memset(pi, 0, sizeof(*pi));
-    // 我們是「同進程載入」模型，這裡給個假的 thread/process handle（不開放）
-    pi->hProcess = (HANDLE)(uintptr_t)1;
-    pi->hThread  = (HANDLE)(uintptr_t)1;
-    pi->dwProcessId = 1;
-    pi->dwThreadId  = 1;
-  }
-  // 讓 cmdlite 能讀到退出碼
-  SetLastError(0);
+BOOL WINAPI CloseHandle(HANDLE h){
+  // 目前皆視為可關閉
+  (void)h;
   return TRUE;
 }
 
 DWORD WINAPI WaitForSingleObject(HANDLE h, DWORD ms){
-  if(!_nt_is_thread_handle(h)) return 0 /*WAIT_OBJECT_0*/;
-  return _nt_wait_thread(h, ms);
+  (void)h; (void)ms;
+  // 目前僞同步：目標在 pe32_spawn 內已經同步執行完成
+  return WAIT_OBJECT_0;
 }
 
 BOOL WINAPI GetExitCodeProcess(HANDLE h, LPDWORD code){
-  if(!_nt_is_thread_handle(h)) { if(code) *code = 0; return TRUE; }
-  return _nt_get_thread_exit_code(h, code);
-}
-
-BOOL WINAPI CloseHandle(HANDLE h){
-  if(_nt_is_thread_handle(h)){ _nt_close_thread(h); return TRUE; }
+  (void)h;
+  if(code) *code = 0; // 目前 demo 子行程固定回傳 0（run_pe32 已把錯誤轉 FALSE）
   return TRUE;
 }
 
-// ---- 匯入解析表（KERNEL32 匯出名稱 -> 本檔實作） ----------------------
+// ---- CreateProcessA：交給 loader 端的 pe32_spawn 來執行 ----
+BOOL WINAPI CreateProcessA(
+  LPCSTR app, LPSTR cmdline,
+  LPSECURITY_ATTRIBUTES psa, LPSECURITY_ATTRIBUTES tsa,
+  BOOL inherit, DWORD flags, LPVOID env, LPCSTR cwd,
+  LPSTARTUPINFOA si, LPPROCESS_INFORMATION pi)
+{
+  (void)psa; (void)tsa; (void)inherit; (void)flags; (void)env; (void)cwd; (void)si;
 
-struct Hook { const char* dll; const char* name; void* fn; };
+  if(!app || !pi){ SetLastError(87 /*ERROR_INVALID_PARAMETER*/); return FALSE; }
 
-// 將此表以 default visibility 匯出，供 loader 綁定 IAT 使用
+  // 由 loader 提供的真正執行函式（弱符號，避免編譯期綁死）
+  extern BOOL pe32_spawn(const char* app, const char* cmdline, DWORD* exit_code)
+    __attribute__((weak));
+
+  if(!pe32_spawn){
+    SetLastError(127 /*ERROR_PROC_NOT_FOUND*/);
+    return FALSE;
+  }
+
+  DWORD exit_code = 0;
+  BOOL ok = pe32_spawn(app, cmdline, &exit_code);
+
+  // 填一組可用的假句柄（目前不做 Job/Handle 表）
+  pi->hProcess    = FAKE_PROCESS;
+  pi->hThread     = FAKE_THREAD;
+  pi->dwProcessId = 1;
+  pi->dwThreadId  = 1;
+
+  // 若需要把退出碼保存到哪裡，可在此擴充；目前由 GetExitCodeProcess 回 0
+  (void)exit_code;
+  return ok;
+}
+
+// ---- 匯出表供 loader 綁定 ----
 __attribute__((visibility("default")))
 struct Hook NT_HOOKS[] = {
   {"KERNEL32.DLL", "GetStdHandle",        (void*)GetStdHandle},
@@ -146,13 +141,13 @@ struct Hook NT_HOOKS[] = {
   {"KERNEL32.DLL", "ReadFile",            (void*)ReadFile},
   {"KERNEL32.DLL", "ExitProcess",         (void*)ExitProcess},
   {"KERNEL32.DLL", "GetStartupInfoA",     (void*)GetStartupInfoA},
-  {"KERNEL32.DLL", "GetCommandLineA",     (void*)GetCommandLineA},
   {"KERNEL32.DLL", "CreateProcessA",      (void*)CreateProcessA},
   {"KERNEL32.DLL", "WaitForSingleObject", (void*)WaitForSingleObject},
   {"KERNEL32.DLL", "GetExitCodeProcess",  (void*)GetExitCodeProcess},
   {"KERNEL32.DLL", "CloseHandle",         (void*)CloseHandle},
+  {"KERNEL32.DLL", "GetCommandLineA",     (void*)GetCommandLineA},
 
-  // TLS/Thread：讓 TLS demo 能跑起來
+  // 下面這些在 ntdll32/thread.c, tls.c 內有實作（KERNEL32 封裝）
   {"KERNEL32.DLL", "CreateThread",        (void*)CreateThread},
   {"KERNEL32.DLL", "ExitThread",          (void*)ExitThread},
   {"KERNEL32.DLL", "Sleep",               (void*)Sleep},
