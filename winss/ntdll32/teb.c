@@ -45,6 +45,11 @@ AWA_EXPORT void* _nt_teb_base(void) {
   return g_teb;
 }
 
+/* Windows 相容 API：回傳目前 TEB（error.c 會用它來拿 LastError 欄位） */
+AWA_EXPORT void* NtCurrentTeb(void) {
+  return g_teb;
+}
+
 /* 把 selector 寫進 %fs（RPL=3） */
 static void set_fs_selector(unsigned short sel){
   asm volatile ("mov %0, %%fs" :: "r"(sel));
