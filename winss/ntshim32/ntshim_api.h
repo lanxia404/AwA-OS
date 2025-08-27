@@ -5,18 +5,15 @@
 extern "C" {
 #endif
 
-/* 由 loader 可註冊的 CreateProcess 實作；回傳 1=成功(可視為 TRUE)、0=失敗(FALSE) */
-typedef int (*pe32_spawn_fn)(const char* path, const char* cmdline /*可為 NULL*/);
-
-/* 設定/覆寫 spawn 實作：在目前行程生命週期內有效 */
+/* Loader 註冊的 spawn 實作型別與 API */
+typedef int (*pe32_spawn_fn)(const char* path, const char* cmdline);
+/* 設定（覆寫）spawn 實作；若未設定，bridge 會使用 fallback（fork+execl） */
 void nt_set_spawn_impl(pe32_spawn_fn fn);
+/* 暴露給 CreateProcessA 使用的統一入口（實際會呼叫上面註冊的 impl，否則 fallback） */
+int  pe32_spawn(const char* path, const char* cmdline);
 
-/* 對外導出：ntshim32 的 CreateProcessA 會呼叫這個，
- * 若未註冊實作則使用 fallback（fork+exec loader）。 */
-int  pe32_spawn(const char* path, const char* cmdline /*可為 NULL*/);
-
-/* 設定 ANSI 版命令列（供 GetCommandLineA 使用） */
-void nt_set_command_lineA(const char* path, const char* argv /*可為 NULL*/);
+/* Loader 在進入被載入 PE 前，用來設定 ANSI 命令列（可視需要擴充為 Unicode 版本） */
+void nt_set_command_lineA(const char* path, const char* argv /* 可為 NULL */);
 
 #ifdef __cplusplus
 }
