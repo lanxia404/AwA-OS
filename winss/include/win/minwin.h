@@ -132,6 +132,15 @@ BOOL   WINAPI ReadFile(HANDLE, LPVOID, DWORD, LPDWORD, LPVOID);
 BOOL   WINAPI WriteFile(HANDLE, LPCVOID, DWORD, LPDWORD, LPVOID);
 __attribute__((noreturn)) void WINAPI ExitProcess(UINT);
 
+/* Console I/O（簡化） */
+BOOL   WINAPI WriteConsoleA(HANDLE, const char*, DWORD, LPDWORD, LPVOID);
+BOOL   WINAPI ReadConsoleA(HANDLE, char*, DWORD, LPDWORD, LPVOID);
+
+BOOL   WINAPI FlushFileBuffers(HANDLE hFile);
+DWORD  WINAPI GetFileType(HANDLE hFile);
+BOOL   WINAPI GetConsoleMode(HANDLE hConsole, LPDWORD mode);
+BOOL   WINAPI SetConsoleMode(HANDLE hConsole, DWORD mode);
+
 BOOL   WINAPI CreateProcessA(LPCSTR, LPSTR, LPVOID, LPVOID, BOOL, DWORD, LPVOID, LPCSTR, STARTUPINFOA*, PROCESS_INFORMATION*);
 BOOL   WINAPI CreateProcessW(LPCWSTR, LPWSTR, LPVOID, LPVOID, BOOL, DWORD, LPVOID, LPCWSTR, STARTUPINFOW*, PROCESS_INFORMATION*);
 
@@ -144,13 +153,8 @@ LPCWSTR WINAPI GetCommandLineW(void);
 
 /* 模組/符號載入 */
 HMODULE WINAPI GetModuleHandleA(LPCSTR name);
+HMODULE WINAPI GetModuleHandleW(LPCWSTR name);
 FARPROC WINAPI GetProcAddress(HMODULE h, LPCSTR name);
-
-/* 主控台/檔案輔助（簡化）*/
-DWORD  WINAPI GetFileType(HANDLE hFile);
-BOOL   WINAPI GetConsoleMode(HANDLE hConsole, LPDWORD mode);
-BOOL   WINAPI SetConsoleMode(HANDLE hConsole, DWORD mode);
-BOOL   WINAPI FlushFileBuffers(HANDLE hFile);
 
 /* --- Threads & TLS --- */
 typedef DWORD (WINAPI *LPTHREAD_START_ROUTINE)(LPVOID lpParameter);
