@@ -1,336 +1,247 @@
 // winss/loader/pe_loader32.c
-// Minimal PE32 loader for AwA-OS (WinSS) with reloc (HIGHLOW), IAT binding,
-// minimal 32-bit TEB/PEB + FS base via set_thread_area, and diagnostics.
+// Minimal PE32 loader for AwA-OS (i386)
+// 改點：以 nt_get_hooks() 取得匯入掛鉤，不再直接引用 NT_HOOKS。
 
-#define _GNU_SOURCE
-#include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <stdio.h>
 #include <unistd.h>
-#include <ctype.h>
-#include <errno.h>
-#include <signal.h>
 #include <sys/mman.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <sys/syscall.h>
-
-#ifndef __x86_64__
-struct user_desc {
-  unsigned int  entry_number;
-  unsigned long base_addr;
-  unsigned int  limit;
-  unsigned int  seg_32bit:1;
-  unsigned int  contents:2;
-  unsigned int  read_exec_only:1;
-  unsigned int  limit_in_pages:1;
-  unsigned int  seg_not_present:1;
-  unsigned int  useable:1;
-  unsigned int  lm:1;
-};
-#ifndef SYS_set_thread_area
- #define SYS_set_thread_area 243
-#endif
-static int set_thread_area_compat(struct user_desc* u)
-{
-  return (int)syscall(SYS_set_thread_area, u);
-}
-#endif
+#include <errno.h>
 
 #include "../include/win/minwin.h"
 #include "../include/nt/hooks.h"
 
-/* PE structs ... (與先前相同，略過註解以節省篇幅) */
+#ifndef PAGE_SIZE
+#define PAGE_SIZE 4096
+#endif
+
+static int env_log = -1;
+static int is_log(void){
+  if (env_log < 0){
+    const char* s = getenv("AWAOS_LOG");
+    env_log = (s && *s) ? 1 : 0;
+  }
+  return env_log;
+}
+#define LOGF(...) do{ if(is_log()){ fprintf(stderr, "[pe_loader32] " __VA_ARGS__); fputc('\n',stderr);} }while(0)
+
+/* ---- 簡化的 PE 結構（只保留必要欄位） ---- */
 #pragma pack(push,1)
-typedef struct { uint16_t e_magic; uint16_t e_cblp,e_cp,e_crlc,e_cparhdr,e_minalloc,e_maxalloc;
-  uint16_t e_ss,e_sp,e_csum,e_ip,e_cs,e_lfarlc,e_ovno;
-  uint16_t e_res[4]; uint16_t e_oemid,e_oeminfo; uint16_t e_res2[10]; int32_t e_lfanew; } IMAGE_DOS_HEADER;
-
-typedef struct { uint32_t Signature; } IMAGE_NT_HEADERS_SIG;
-
-typedef struct { uint16_t Machine, NumberOfSections; uint32_t TimeDateStamp, PointerToSymbolTable, NumberOfSymbols;
-  uint16_t SizeOfOptionalHeader, Characteristics; } IMAGE_FILE_HEADER;
-
-typedef struct { uint32_t VirtualAddress, Size; } IMAGE_DATA_DIRECTORY;
-
-#define IMAGE_NUMBEROF_DIRECTORY_ENTRIES 16
+typedef struct {
+  uint16_t e_magic; /* MZ */
+  uint16_t e_cblp, e_cp, e_crlc, e_cparhdr, e_minalloc, e_maxalloc, e_ss, e_sp, e_csum, e_ip, e_cs, e_lfarlc, e_ovno;
+  uint16_t e_res[4], e_oemid, e_oeminfo, e_res2[10];
+  uint32_t e_lfanew;
+} DOS_HDR;
 
 typedef struct {
-  uint16_t Magic; uint8_t MajorLinkerVersion, MinorLinkerVersion;
-  uint32_t SizeOfCode, SizeOfInitializedData, SizeOfUninitializedData;
-  uint32_t AddressOfEntryPoint, BaseOfCode, BaseOfData;
-  uint32_t ImageBase; uint32_t SectionAlignment, FileAlignment;
-  uint16_t MajorOperatingSystemVersion, MinorOperatingSystemVersion;
-  uint16_t MajorImageVersion, MinorImageVersion;
-  uint16_t MajorSubsystemVersion, MinorSubsystemVersion;
-  uint32_t Win32VersionValue, SizeOfImage, SizeOfHeaders, CheckSum;
-  uint16_t Subsystem, DllCharacteristics;
-  uint32_t SizeOfStackReserve, SizeOfStackCommit;
-  uint32_t SizeOfHeapReserve, SizeOfHeapCommit;
-  uint32_t LoaderFlags, NumberOfRvaAndSizes;
-  IMAGE_DATA_DIRECTORY DataDirectory[IMAGE_NUMBEROF_DIRECTORY_ENTRIES];
-} IMAGE_OPTIONAL_HEADER32;
+  uint32_t Signature;      /* "PE\0\0" */
+  uint16_t Machine;        /* 0x14c */
+  uint16_t NumberOfSections;
+  uint32_t TimeDateStamp, PointerToSymbolTable, NumberOfSymbols;
+  uint16_t SizeOfOptionalHeader, Characteristics;
+} COFF_HDR;
 
-typedef struct { uint32_t Signature; IMAGE_FILE_HEADER FileHeader; IMAGE_OPTIONAL_HEADER32 OptionalHeader; } IMAGE_NT_HEADERS32;
+typedef struct {
+  uint16_t  Magic;         /* 0x10b */
+  uint8_t   MajorLinkerVersion, MinorLinkerVersion;
+  uint32_t  SizeOfCode, SizeOfInitializedData, SizeOfUninitializedData;
+  uint32_t  AddressOfEntryPoint;     /* RVA */
+  uint32_t  BaseOfCode, BaseOfData;
+  uint32_t  ImageBase;
+  uint32_t  SectionAlignment, FileAlignment;
+  uint16_t  MajorOSVersion, MinorOSVersion;
+  uint16_t  MajorImageVersion, MinorImageVersion;
+  uint16_t  MajorSubsystemVersion, MinorSubsystemVersion;
+  uint32_t  Win32VersionValue, SizeOfImage, SizeOfHeaders, CheckSum;
+  uint16_t  Subsystem, DllCharacteristics;
+  uint32_t  SizeOfStackReserve, SizeOfStackCommit;
+  uint32_t  SizeOfHeapReserve, SizeOfHeapCommit;
+  uint32_t  LoaderFlags, NumberOfRvaAndSizes;
+  struct { uint32_t RVA, Size; } DataDirectory[16];
+} OPT_HDR32;
 
-typedef struct { uint8_t Name[8]; union{ uint32_t PhysicalAddress; uint32_t VirtualSize; } Misc;
-  uint32_t VirtualAddress, SizeOfRawData, PointerToRawData;
-  uint32_t PointerToRelocations, PointerToLinenumbers; uint16_t NumberOfRelocations, NumberOfLinenumbers;
-  uint32_t Characteristics; } IMAGE_SECTION_HEADER;
+typedef struct {
+  uint8_t  Name[8];
+  uint32_t VirtualSize, VirtualAddress;
+  uint32_t SizeOfRawData, PointerToRawData;
+  uint32_t PointerToRelocations, PointerToLinenumbers;
+  uint16_t NumberOfRelocations, NumberOfLinenumbers;
+  uint32_t Characteristics;
+} SEC_HDR;
 
-typedef struct { uint32_t OriginalFirstThunk, TimeDateStamp, ForwarderChain, Name, FirstThunk; } IMAGE_IMPORT_DESCRIPTOR;
-
-typedef struct { uint16_t Hint; char Name[1]; } IMAGE_IMPORT_BY_NAME;
-
-typedef union { uint32_t ForwarderString, Function, Ordinal, AddressOfData; } IMAGE_THUNK_DATA32;
-
-typedef struct { uint32_t VirtualAddress, SizeOfBlock; } IMAGE_BASE_RELOCATION;
+typedef struct {
+  uint32_t OriginalFirstThunk; /* RVA of INT (or characteristics) */
+  uint32_t TimeDateStamp, ForwarderChain, Name, FirstThunk; /* Name: RVA of DLL name, FirstThunk: IAT */
+} IMAGE_IMPORT_DESCRIPTOR;
 #pragma pack(pop)
 
-#define IMAGE_DIRECTORY_ENTRY_IMPORT     1
-#define IMAGE_DIRECTORY_ENTRY_BASERELOC  5
+/* ---- 封裝映像 ---- */
+typedef struct {
+  uint8_t*  map;
+  uint32_t  prefer_base;
+  int32_t   delta;
+  uint32_t  entry_rva;
+  uint32_t  import_rva, import_size;
+  uint32_t  reloc_rva,  reloc_size;
+  const char* path;
+} PEIMG;
 
-#define IMAGE_REL_BASED_ABSOLUTE 0
-#define IMAGE_REL_BASED_HIGHLOW  3
+/* ---- 小工具 ---- */
+static uint16_t rd16(const void* p){ const uint8_t* b=p; return (uint16_t)(b[0] | (b[1]<<8)); }
+static uint32_t rd32(const void* p){ const uint8_t* b=p; return (uint32_t)(b[0] | (b[1]<<8) | (b[2]<<16) | (b[3]<<24)); }
+static uint8_t*  rva(PEIMG* img, uint32_t v){ return img->map + v; }
 
-static int g_log = 0;
-#define LOGF(...) do{ if(g_log){ fprintf(stderr,"[pe_loader32] " __VA_ARGS__); fputc('\n',stderr);} }while(0)
+/* ---- 載入 ---- */
+static int load_pe32(const char* path, PEIMG* out){
+  memset(out, 0, sizeof(*out));
+  FILE* f = fopen(path, "rb");
+  if(!f){ perror("fopen"); return -1; }
+  fseek(f, 0, SEEK_END);
+  long sz = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  uint8_t* buf = (uint8_t*)malloc(sz);
+  if(!buf){ fclose(f); return -1; }
+  if(fread(buf,1,sz,f) != (size_t)sz){ fclose(f); free(buf); return -1; }
+  fclose(f);
 
-extern struct Hook NT_HOOKS[];
+  if (sz < (long)sizeof(DOS_HDR)) { free(buf); return -1; }
+  DOS_HDR* dos = (DOS_HDR*)buf;
+  if (rd16(&dos->e_magic) != 0x5a4d) { free(buf); return -1; }
 
-/* 字串輔助、IAT 綁定（與先前相同） */
-static int ieq(const char* a, const char* b){
-  while(*a && *b){
-    int ca = (*a>='A'&&*a<='Z')? *a+32 : (unsigned char)*a;
-    int cb = (*b>='A'&&*b<='Z')? *b+32 : (unsigned char)*b;
-    if (ca!=cb) return 0; ++a; ++b;
-  }
-  return *a==0 && *b==0;
-}
-static void undecorate(const char* in, char* out, size_t cap){
-  size_t i=0,j=0;
-  if (in[0]=='_') ++i;
-  for (; in[i] && j+1<cap; ++i){
-    if (in[i]=='@'){
-      size_t k=i+1; int all=1;
-      while(in[k]){ if(!isdigit((unsigned char)in[k])){ all=0; break; } ++k; }
-      if (all) break;
+  uint32_t peoff = dos->e_lfanew;
+  if (peoff + 4 + sizeof(COFF_HDR) + sizeof(OPT_HDR32) > (uint32_t)sz){ free(buf); return -1; }
+  if (rd32(buf+peoff) != 0x00004550){ free(buf); return -1; }
+
+  COFF_HDR*  coff = (COFF_HDR*)(buf + peoff + 4);
+  OPT_HDR32* opt  = (OPT_HDR32*)((uint8_t*)coff + sizeof(COFF_HDR));
+  if (opt->Magic != 0x10b){ free(buf); return -1; }
+
+  uintptr_t map_sz = (opt->SizeOfImage + PAGE_SIZE-1) & ~(PAGE_SIZE-1);
+  uint8_t* map = mmap(NULL, map_sz, PROT_READ|PROT_WRITE|PROT_EXEC, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+  if (map == MAP_FAILED){ free(buf); return -1; }
+
+  memcpy(map, buf, opt->SizeOfHeaders);
+
+  SEC_HDR* sec = (SEC_HDR*)((uint8_t*)opt + coff->SizeOfOptionalHeader);
+  for (uint16_t i=0;i<coff->NumberOfSections;++i){
+    if (sec[i].SizeOfRawData && sec[i].PointerToRawData &&
+        sec[i].PointerToRawData + sec[i].SizeOfRawData <= (uint32_t)sz){
+      memcpy(map + sec[i].VirtualAddress, buf + sec[i].PointerToRawData, sec[i].SizeOfRawData);
     }
-    out[j++] = in[i];
   }
-  out[j]=0;
+
+  out->map         = map;
+  out->prefer_base = opt->ImageBase;
+  out->delta       = (int32_t)((intptr_t)map - (intptr_t)opt->ImageBase);
+  out->entry_rva   = opt->AddressOfEntryPoint;
+  out->import_rva  = opt->DataDirectory[1].RVA;
+  out->import_size = opt->DataDirectory[1].Size;
+  out->reloc_rva   = opt->DataDirectory[5].RVA;
+  out->reloc_size  = opt->DataDirectory[5].Size;
+  out->path        = path;
+
+  LOGF("mapped '%s': pref=0x%08x map=%p delta=%d (0x%08x)",
+       path, out->prefer_base, (void*)map, out->delta, (uint32_t)out->delta);
+  free(buf);
+  return 0;
 }
-static void* resolve_import(const char* dll, const char* name){
-  for (struct Hook* p=NT_HOOKS; p && p->dll; ++p){
-    if (ieq(p->dll, dll) && strcmp(p->name, name)==0) return p->fn;
+
+/* ---- 重定位（HIGHLOW） ---- */
+static void apply_relocs(PEIMG* img){
+  if (!img->reloc_rva || !img->reloc_size || !img->delta) return;
+
+  uint8_t* p = rva(img, img->reloc_rva);
+  uint8_t* end = p + img->reloc_size;
+  int patched=0, blocks=0;
+
+  while (p + 8 <= end){
+    uint32_t page_rva  = rd32(p+0);
+    uint32_t block_sz  = rd32(p+4);
+    p += 8;
+    uint32_t cnt = (block_sz - 8) / 2;
+    for (uint32_t i=0;i<cnt;++i){
+      uint16_t e = rd16(p + i*2);
+      uint16_t type = e >> 12;
+      uint16_t off  = e & 0xfff;
+      if (type == 3 /*HIGHLOW*/){
+        uint32_t* patch = (uint32_t*)(img->map + page_rva + off);
+        *patch += (uint32_t)img->delta;
+        ++patched;
+      }
+    }
+    p += cnt*2;
+    ++blocks;
   }
-  char clean[128]; undecorate(name, clean, sizeof(clean));
-  for (struct Hook* p=NT_HOOKS; p && p->dll; ++p){
-    if (ieq(p->dll, dll) && strcmp(p->name, clean)==0) return p->fn;
+  LOGF("reloc blocks=%d, HIGHLOW patched=%d", blocks, patched);
+}
+
+/* ---- 匯入解析（改為使用 nt_get_hooks()） ---- */
+static void* lookup_import(const char* dll, const char* name){
+  const struct Hook* hk = nt_get_hooks();
+  for (; hk && hk->dll; ++hk){
+    if (strcasecmp(hk->dll, dll)==0 && strcmp(hk->name, name)==0){
+      return hk->fn;
+    }
   }
-  LOGF("Unresolved import: %s!%s", dll, name);
   return NULL;
 }
 
-/* 讀檔、SEGV handler（同前） */
-static uint8_t* read_file(const char* path, size_t* outSz){
-  int fd = open(path, O_RDONLY);
-  if (fd<0) return NULL;
-  struct stat st; if (fstat(fd,&st)<0){ close(fd); return NULL; }
-  size_t sz = (size_t)st.st_size;
-  uint8_t* buf = (uint8_t*)malloc(sz);
-  if(!buf){ close(fd); return NULL; }
-  size_t off=0;
-  while(off<sz){
-    ssize_t n = read(fd, buf+off, sz-off);
-    if (n<=0){ free(buf); close(fd); return NULL; }
-    off += (size_t)n;
-  }
-  close(fd);
-  if (outSz) *outSz = sz;
-  return buf;
-}
-static void segv_handler(int sig, siginfo_t* si, void* ctx){
-  (void)sig; (void)ctx; void* addr = si ? si->si_addr : NULL;
-  LOGF("SIGSEGV at %p", addr);
-  _exit(139);
-}
+static void bind_imports(PEIMG* img){
+  if (!img->import_rva || !img->import_size) return;
 
-/* --- minimal TEB/PEB + FS base (i386) --- */
-#ifndef __x86_64__
-static void* g_teb32 = NULL;
-static void* g_peb32 = NULL;
-static int setup_teb_fs32(void){
-  g_teb32 = mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-  g_peb32 = mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-  if (g_teb32==MAP_FAILED || g_peb32==MAP_FAILED) return -1;
-  *(uint32_t*)((uint8_t*)g_teb32 + 0x18) = (uint32_t)(uintptr_t)g_teb32; /* FS:[0x18]=TEB self */
-  *(uint32_t*)((uint8_t*)g_teb32 + 0x30) = (uint32_t)(uintptr_t)g_peb32; /* FS:[0x30]=PEB     */
-  *(uint32_t*)((uint8_t*)g_teb32 + 0x34) = 0;                              /* FS:[0x34]=LastErr*/
+  IMAGE_IMPORT_DESCRIPTOR* desc =
+      (IMAGE_IMPORT_DESCRIPTOR*)rva(img, img->import_rva);
 
-  struct user_desc ud; memset(&ud, 0, sizeof(ud));
-  ud.entry_number   = (unsigned)-1;
-  ud.base_addr      = (unsigned long)(uintptr_t)g_teb32;
-  ud.limit          = 0xFFFFF; ud.seg_32bit=1; ud.read_exec_only=0; ud.limit_in_pages=1; ud.seg_not_present=0; ud.useable=1;
-  if (set_thread_area_compat(&ud) != 0) return -1;
-  unsigned short sel = (unsigned short)((ud.entry_number << 3) | 0x3);
-  __asm__ __volatile__("movw %0, %%fs" : : "r"(sel));
-  LOGF("TEB set: fs selector=0x%hx base=%p", sel, g_teb32);
-  return 0;
-}
-#else
-static int setup_teb_fs32(void){ return 0; }
-#endif
+  for (; desc->Name; ++desc){
+    const char* dll = (const char*)rva(img, desc->Name);
+    LOGF("bind: %s", dll);
 
-/* optional command line setter from ntshim32; make it weak to avoid link error */
-__attribute__((weak)) void nt_set_command_lineA(const char* s){ (void)s; }
-
-/* ---- core loader ---- */
-static int run_pe32(const char* path, int argc, char** argv){
-  size_t fsz=0; uint8_t* file = read_file(path,&fsz);
-  if(!file){ fprintf(stderr,"[pe_loader32] cannot read file: %s\n", path); return 127; }
-
-  IMAGE_DOS_HEADER* mz = (IMAGE_DOS_HEADER*)file;
-  if (fsz < sizeof(*mz) || mz->e_magic != 0x5A4D){ fprintf(stderr,"[pe_loader32] bad MZ\n"); free(file); return 127; }
-  if ((size_t)mz->e_lfanew + sizeof(IMAGE_NT_HEADERS32) > fsz){ fprintf(stderr,"[pe_loader32] bad e_lfanew\n"); free(file); return 127; }
-
-  IMAGE_NT_HEADERS32* nt = (IMAGE_NT_HEADERS32*)(file + mz->e_lfanew);
-  IMAGE_NT_HEADERS_SIG* sig = (IMAGE_NT_HEADERS_SIG*)nt;
-  if (sig->Signature != 0x00004550){ fprintf(stderr,"[pe_loader32] bad PE sig\n"); free(file); return 127; }
-
-  IMAGE_FILE_HEADER* fh = &nt->FileHeader;
-  IMAGE_OPTIONAL_HEADER32* oh = &nt->OptionalHeader;
-  IMAGE_SECTION_HEADER* sh = (IMAGE_SECTION_HEADER*)((uint8_t*)&nt->OptionalHeader + fh->SizeOfOptionalHeader);
-
-  uint32_t imageSize = oh->SizeOfImage;
-  uint32_t headersSz = oh->SizeOfHeaders;
-  uint8_t* base = (uint8_t*)mmap(NULL, imageSize, PROT_READ|PROT_WRITE|PROT_EXEC, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-  if (base == MAP_FAILED){ perror("[pe_loader32] mmap"); free(file); return 127; }
-
-  memcpy(base, file, headersSz);
-  for (int i=0;i<fh->NumberOfSections;++i){
-    uint32_t vsize = sh[i].Misc.VirtualSize;
-    uint32_t vaddr = sh[i].VirtualAddress;
-    uint32_t rawsz = sh[i].SizeOfRawData;
-    uint32_t rawoff= sh[i].PointerToRawData;
-    if (vsize==0) continue;
-    if (vaddr + vsize > imageSize){ fprintf(stderr,"[pe_loader32] section overflow\n"); munmap(base,imageSize); free(file); return 127; }
-    uint8_t* dst = base + vaddr;
-    if (rawsz){
-      if ((size_t)rawoff + rawsz > fsz){ fprintf(stderr,"[pe_loader32] raw overflow\n"); munmap(base,imageSize); free(file); return 127; }
-      memcpy(dst, file + rawoff, rawsz);
-    }
-    if (vsize > rawsz) memset(dst + rawsz, 0, vsize - rawsz);
-  }
-
-  uintptr_t preferred = (uintptr_t)oh->ImageBase;
-  uintptr_t mapped    = (uintptr_t)base;
-  intptr_t  delta     = (intptr_t)(mapped - preferred);
-
-  if (getenv("AWAOS_LOG")) g_log = 1;
-  LOGF("mapped '%s': pref=0x%08lx map=0x%08lx delta=%ld (0x%08lx)",
-       path, (unsigned long)preferred, (unsigned long)mapped, (long)delta, (unsigned long)delta);
-
-  /* reloc */
-  uint32_t reloc_rva  = oh->DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress;
-  uint32_t reloc_size = oh->DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size;
-  size_t blocks=0, patches=0;
-  if (delta!=0 && reloc_rva && reloc_size){
-    uint32_t off = reloc_rva, end = reloc_rva + reloc_size;
-    while (off + sizeof(IMAGE_BASE_RELOCATION) <= end){
-      IMAGE_BASE_RELOCATION* br = (IMAGE_BASE_RELOCATION*)(base + off);
-      if (br->SizeOfBlock < sizeof(IMAGE_BASE_RELOCATION)) break;
-      uint32_t page = br->VirtualAddress;
-      uint32_t cnt  = (br->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(uint16_t);
-      uint16_t* ent = (uint16_t*)(base + off + sizeof(IMAGE_BASE_RELOCATION));
-      ++blocks;
-      for (uint32_t i=0;i<cnt;++i){
-        uint16_t e = ent[i];
-        uint16_t type   = (e >> 12) & 0xF;
-        uint16_t offset = (e & 0x0FFF);
-        uint32_t* spot  = (uint32_t*)(base + page + offset);
-        if ((uint8_t*)spot < base || (uint8_t*)spot+4 > base+imageSize) continue;
-        if (type == IMAGE_REL_BASED_HIGHLOW){ *spot = (uint32_t)((uint32_t)(*spot) + (uint32_t)delta); ++patches; }
-        else if (type == IMAGE_REL_BASED_ABSOLUTE){ /* no-op */ }
-        else { LOGF("reloc: unsupported type %u at rva 0x%08x", (unsigned)type, (unsigned)(page+offset)); }
+    uint32_t* IAT = (uint32_t*)rva(img, desc->FirstThunk);
+    uint32_t* INT = desc->OriginalFirstThunk
+                  ? (uint32_t*)rva(img, desc->OriginalFirstThunk)
+                  : IAT;
+    for (; *IAT; ++IAT, ++INT){
+      uint32_t hint_name_rva = *INT;
+      void* fn = NULL;
+      if (!(hint_name_rva & 0x80000000u)){
+        const char* name = (const char*)rva(img, hint_name_rva + 2);
+        fn = lookup_import(dll, name);
+        if (!fn) LOGF("Unresolved import: %s!%s", dll, name);
+        LOGF("    %-20s -> %p", name, fn);
       }
-      off += br->SizeOfBlock;
+      *IAT = (uint32_t)(uintptr_t)fn;
     }
   }
-  LOGF("reloc blocks=%zu, HIGHLOW patched=%zu", blocks, patches);
+}
 
-  /* imports */
-  uint32_t imp_rva  = oh->DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
-  uint32_t imp_size = oh->DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size;
-  if (imp_rva && imp_size){
-    IMAGE_IMPORT_DESCRIPTOR* imp = (IMAGE_IMPORT_DESCRIPTOR*)(base + imp_rva);
-    for (; imp->Name; ++imp){
-      const char* dll = (const char*)(base + imp->Name);
-      if (!dll) break;
-      char dllnorm[64]; size_t j=0;
-      for (size_t i=0; dll[i] && j+1<sizeof(dllnorm); ++i){ char c=dll[i]; dllnorm[j++]=(c>='a'&&c<='z')?(c-32):c; }
-      dllnorm[j]=0;
-      LOGF("bind: %s", dllnorm);
+/* ---- 執行 ---- */
+static int run_pe32(const char* path){
+  PEIMG img;
+  if (load_pe32(path, &img) != 0) return 1;
 
-      uint32_t oft = imp->OriginalFirstThunk ? imp->OriginalFirstThunk : imp->FirstThunk;
-      IMAGE_THUNK_DATA32* ntab = (IMAGE_THUNK_DATA32*)(base + oft);
-      IMAGE_THUNK_DATA32* iat  = (IMAGE_THUNK_DATA32*)(base + imp->FirstThunk);
+  apply_relocs(&img);
+  bind_imports(&img);
 
-      for (; ntab->AddressOfData; ++ntab, ++iat){
-        if (ntab->Ordinal & 0x80000000u){
-          LOGF("  import by ordinal: 0x%08x", (unsigned)(ntab->Ordinal & 0xFFFF));
-          iat->Function = 0;
-        }else{
-          IMAGE_IMPORT_BY_NAME* ibn = (IMAGE_IMPORT_BY_NAME*)(base + ntab->AddressOfData);
-          const char* name = (const char*)ibn->Name;
-          void* fn = resolve_import(dllnorm, name);
-          iat->Function = (uint32_t)(uintptr_t)(fn ? fn : 0);
-          LOGF("    %-20s -> %p", name, (void*)(uintptr_t)iat->Function);
-        }
-      }
-    }
-  }
+  if (!img.entry_rva){ LOGF("no entry"); return 1; }
+  void (*entry_fn)(void) = (void(*)(void))(img.map + img.entry_rva);
+  LOGF("entering entrypoint 0x%08x for %s", img.entry_rva, path);
 
-  /* entrypoint */
-  uint32_t ep_rva = oh->AddressOfEntryPoint;
-  if (!ep_rva){ fprintf(stderr,"[pe_loader32] no entrypoint\n"); munmap(base,imageSize); free(file); return 127; }
-  void (*entry)(void) = (void(*)(void))(base + ep_rva);
-  LOGF("entering entrypoint 0x%08x for %s", ep_rva, path);
+  /* 設定 TEB（由 ntdll32/teb.c 提供） */
+  extern void _nt_teb_setup_for_current(void);
+  _nt_teb_setup_for_current();
 
-  struct sigaction sa; memset(&sa,0,sizeof(sa));
-  sa.sa_sigaction = segv_handler; sa.sa_flags = SA_SIGINFO;
-  sigaction(SIGSEGV, &sa, NULL);
-
-#ifndef __x86_64__
-  if (setup_teb_fs32()!=0){
-    LOGF("warning: setup_teb_fs32 failed; PE may crash if it touches FS");
-  }
-#endif
-
-  /* pass command line to NT shim (optional) */
-  {
-    char cmdbuf[256]; size_t k=0;
-    for (int i=0;i<argc && k+2<sizeof(cmdbuf); ++i){
-      const char* s = argv[i]; if (i) cmdbuf[k++]=' ';
-      while(*s && k+1<sizeof(cmdbuf)) cmdbuf[k++]=*s++;
-    }
-    cmdbuf[k]=0;
-    if (nt_set_command_lineA) nt_set_command_lineA(cmdbuf);
-  }
-
-  entry();
-
-  munmap(base,imageSize);
-  free(file);
+  entry_fn();
   return 0;
 }
 
 int main(int argc, char** argv){
-  if (getenv("AWAOS_LOG")) g_log = 1;
   if (argc < 2){
-    fprintf(stderr,"Usage: pe_loader32 <pe.exe> [args...]\n");
+    fprintf(stderr, "usage: %s <pe32.exe> [args...]\n", argv[0]);
     return 2;
   }
-  return run_pe32(argv[1], argc-1, &argv[1]);
+  return run_pe32(argv[1]);
 }
