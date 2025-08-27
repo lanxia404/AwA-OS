@@ -6,6 +6,7 @@ add_library(ntshim32 STATIC
   ../ntdll32/error.c
   ../ntdll32/tls.c
   ../ntdll32/thread.c
+  ../ntdll32/teb_init.c
 )
 
 target_include_directories(ntshim32 PUBLIC
