@@ -78,6 +78,14 @@ typedef unsigned int UINT;
 # define STILL_ACTIVE 259u
 #endif
 
+/* --- 檔案型別常數（給 GetFileType 用） --- */
+#ifndef FILE_TYPE_UNKNOWN
+# define FILE_TYPE_UNKNOWN 0x0000
+# define FILE_TYPE_DISK    0x0001
+# define FILE_TYPE_CHAR    0x0002
+# define FILE_TYPE_PIPE    0x0003
+#endif
+
 /* --- 最小 STARTUPINFO / PROCESS_INFORMATION 定義 --- */
 typedef struct _STARTUPINFOA {
   DWORD cb;
@@ -118,7 +126,7 @@ typedef struct _PROCESS_INFORMATION {
   DWORD  dwThreadId;
 } PROCESS_INFORMATION;
 
-/* --- 常用 KERNEL32 原型 --- */
+/* --- KERNEL32 原型：I/O/程序 --- */
 HANDLE WINAPI GetStdHandle(DWORD nStdHandle);
 BOOL   WINAPI ReadFile(HANDLE, LPVOID, DWORD, LPDWORD, LPVOID);
 BOOL   WINAPI WriteFile(HANDLE, LPCVOID, DWORD, LPDWORD, LPVOID);
@@ -134,9 +142,15 @@ BOOL   WINAPI CloseHandle(HANDLE);
 LPCSTR  WINAPI GetCommandLineA(void);
 LPCWSTR WINAPI GetCommandLineW(void);
 
-/* 模組/符號載入（shim 會用 NT_HOOKS 回傳） */
+/* 模組/符號載入 */
 HMODULE WINAPI GetModuleHandleA(LPCSTR name);
 FARPROC WINAPI GetProcAddress(HMODULE h, LPCSTR name);
+
+/* 主控台/檔案輔助（簡化）*/
+DWORD  WINAPI GetFileType(HANDLE hFile);
+BOOL   WINAPI GetConsoleMode(HANDLE hConsole, LPDWORD mode);
+BOOL   WINAPI SetConsoleMode(HANDLE hConsole, DWORD mode);
+BOOL   WINAPI FlushFileBuffers(HANDLE hFile);
 
 /* --- Threads & TLS --- */
 typedef DWORD (WINAPI *LPTHREAD_START_ROUTINE)(LPVOID lpParameter);
