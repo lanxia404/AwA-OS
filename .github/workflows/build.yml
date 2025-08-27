@@ -67,6 +67,7 @@ jobs:
 
       - name: Smoke test hello.exe
         run: |
+          export AWAOS_LOG=1
           out=$(/usr/lib/awaos/pe_loader32 ./tests/win32-hello/hello.exe || true)
           echo "OUTPUT => [$out]"
           # 寬鬆比對關鍵字，避免訊息微調造成誤判
@@ -89,6 +90,7 @@ jobs:
       - name: Build & Run TLS demo
         shell: bash
         run: |
+          export AWAOS_LOG=1
           set -euxo pipefail
           i686-w64-mingw32-gcc tests/win32-tls-demo/tls_demo.c -s -o tests/win32-tls-demo/tls_demo.exe \
             -ffreestanding -fno-asynchronous-unwind-tables \
