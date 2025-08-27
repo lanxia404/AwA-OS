@@ -4,6 +4,7 @@
 //  - WriteFile / ReadFile (works with redirection/pipes)
 //  - ExitProcess / CloseHandle / WaitForSingleObject / GetExitCodeProcess / GetStartupInfoA
 //  - CreateProcessA: minimal stub (reports success & exit code 0 for tests)
+//  - GetCommandLineA + nt_set_command_lineA storage
 //  - Export table NT_HOOKS for loader binding
 
 #include <unistd.h>
@@ -41,22 +42,31 @@ typedef void VOID;
 static int _log_enabled = 0;
 #define LOGF(...) do{ if(_log_enabled){ fprintf(stderr,"[ntshim32] " __VA_ARGS__); fputc('\n',stderr);} }while(0)
 
-/* --- Optional thread helpers from ntdll32 (mark as weak to avoid link errors when absent) --- */
+/* --- Optional thread helpers from ntdll32 (weak to avoid link errors when absent) --- */
 __attribute__((weak)) int   _nt_is_thread_handle(HANDLE h);
 __attribute__((weak)) BOOL  _nt_close_thread(HANDLE h);
 __attribute__((weak)) DWORD _nt_wait_thread(HANDLE h, DWORD ms);
 __attribute__((weak)) BOOL  _nt_get_thread_exit_code(HANDLE h, LPDWORD code);
 
-/* ---- Map Windows pseudo handles to Linux fds ----
-   Windows:  STD_INPUT_HANDLE  = (DWORD)-10
-             STD_OUTPUT_HANDLE = (DWORD)-11
-             STD_ERROR_HANDLE  = (DWORD)-12  */
+/* ---- Command line storage for GetCommandLineA ---- */
+static char g_cmdlineA[1024] = {0};
+
+/* visible to the loader */
+__attribute__((visibility("default")))
+void nt_set_command_lineA(const char* s) {
+  if (!s) { g_cmdlineA[0] = 0; return; }
+  size_t n = strlen(s);
+  if (n >= sizeof(g_cmdlineA)) n = sizeof(g_cmdlineA)-1;
+  memcpy(g_cmdlineA, s, n);
+  g_cmdlineA[n] = 0;
+}
+
 static int map_handle(HANDLE h) {
   DWORD key = (DWORD)(uintptr_t)h;
   if (key == (DWORD)-10) return 0; // stdin
   if (key == (DWORD)-11) return 1; // stdout
   if (key == (DWORD)-12) return 2; // stderr
-  return -1; // not a std handle (maybe our pseudo thread handle)
+  return -1; // not a std handle
 }
 
 /* ---- kernel32 exports ---- */
@@ -72,7 +82,6 @@ BOOL WINAPI WriteFile(HANDLE h, const void* buf, DWORD len, LPDWORD written, LPV
 
   int fd = map_handle(h);
   if (fd < 0) {
-    // Non-std handle write not supported yet
     SetLastError(6 /*ERROR_INVALID_HANDLE*/);
     return FALSE;
   }
@@ -83,7 +92,6 @@ BOOL WINAPI WriteFile(HANDLE h, const void* buf, DWORD len, LPDWORD written, LPV
   return TRUE;
 }
 
-/* FIX: use map_handle(HANDLE) directly; previously passing DWORD broke the signature */
 BOOL WINAPI ReadFile(HANDLE h, LPVOID buf, DWORD toRead, LPDWORD out, LPVOID overlapped) {
   (void)overlapped;
   if (out) *out = 0;
@@ -109,8 +117,7 @@ __attribute__((noreturn)) void WINAPI ExitProcess(UINT code) {
 BOOL WINAPI CloseHandle(HANDLE h) {
   int fd = map_handle(h);
   if (fd >= 0) {
-    // Do not actually close 0/1/2; just succeed
-    return TRUE;
+    return TRUE; // do not actually close 0/1/2
   }
   if (_nt_is_thread_handle && _nt_is_thread_handle(h)) {
     if (_nt_close_thread) return _nt_close_thread(h);
@@ -141,7 +148,6 @@ BOOL WINAPI GetExitCodeProcess(HANDLE h, LPDWORD code) {
   return TRUE;
 }
 
-/* Use concrete pointer types to avoid LP* typedef requirements */
 VOID WINAPI GetStartupInfoA(STARTUPINFOA* psi) {
   if (!psi) return;
   memset(psi, 0, sizeof(*psi));
@@ -152,8 +158,12 @@ VOID WINAPI GetStartupInfoA(STARTUPINFOA* psi) {
   psi->hStdError  = (HANDLE)(uintptr_t)STD_ERROR_HANDLE;
 }
 
-/* Minimal stub: succeed and provide fake handles/IDs so cmdlite flow continues.
-   The actual PE execution is exercised by pe_loader32 smoke/integration tests. */
+/* Also export GetCommandLineA so future apps can query it */
+LPSTR WINAPI GetCommandLineA(void) {
+  return g_cmdlineA;
+}
+
+/* Minimal stub: succeed and provide fake handles/IDs so cmdlite flow continues. */
 BOOL WINAPI CreateProcessA(
   LPCSTR app, LPSTR cmdline,
   LPVOID psa, LPVOID tsa, BOOL inherit, DWORD flags,
@@ -175,7 +185,7 @@ BOOL WINAPI CreateProcessA(
   return TRUE;
 }
 
-/* ---- Export table for the loader (case-insensitive match on DLL; names exact or undecorated) ---- */
+/* ---- Export table for the loader ---- */
 __attribute__((visibility("default")))
 struct Hook NT_HOOKS[] = {
   {"KERNEL32.DLL", "GetStdHandle",        (void*)GetStdHandle},
@@ -186,6 +196,7 @@ struct Hook NT_HOOKS[] = {
   {"KERNEL32.DLL", "WaitForSingleObject", (void*)WaitForSingleObject},
   {"KERNEL32.DLL", "GetExitCodeProcess",  (void*)GetExitCodeProcess},
   {"KERNEL32.DLL", "GetStartupInfoA",     (void*)GetStartupInfoA},
+  {"KERNEL32.DLL", "GetCommandLineA",     (void*)GetCommandLineA},
   {"KERNEL32.DLL", "CreateProcessA",      (void*)CreateProcessA},
   {NULL, NULL, NULL}
 };
