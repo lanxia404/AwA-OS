@@ -1,5 +1,9 @@
 // tests/win32-cmdlite/cmdlite.c
 // Minimal cmd-like shell for AwA-OS Win32 personality (i386)
+// Build (CI):
+//   i686-w64-mingw32-gcc -s -o tests/win32-cmdlite/cmdlite.exe \
+//     -ffreestanding -fno-asynchronous-unwind-tables \
+//     -nostdlib -Wl,--entry=_main@0 -Wl,--subsystem,console -lkernel32
 #include "../../winss/include/win/minwin.h"
 #include <stdint.h>
 
@@ -16,18 +20,18 @@ static void  put(const char* s){ DWORD w; WriteFile(OUT, s, s_len(s), &w, 0); }
 static void  putln(const char* s){ DWORD w; WriteFile(OUT, s, s_len(s), &w, 0); WriteFile(OUT, "\r\n", 2, &w, 0); }
 static void  putu(unsigned v){ char b[16]; int i=15; b[i--]=0; if(!v){ b[i]='0'; put(&b[i]); return; } while(v&&i>=0){ b[i--]='0'+(v%10); v/=10; } put(&b[i+1]); }
 
-/* -------- 緩衝式讀行（處理短讀與一次多行） -------- */
+/* ---- 緩衝式讀行：能處理管線短讀與一次多行輸入 ---- */
 static char  ibuf[1024];
 static DWORD ilen = 0, ipos = 0;
 
 static int fill_input(void){
-  if (ipos > 0 && ipos < ilen){ /* 壓縮未消耗資料到起點 */
+  if (ipos > 0 && ipos < ilen){
     DWORD rem = ilen - ipos;
     for (DWORD i=0;i<rem;++i) ibuf[i] = ibuf[ipos + i];
     ilen = rem; ipos = 0;
   } else if (ipos >= ilen){ ilen = 0; ipos = 0; }
 
-  if (ilen >= sizeof(ibuf)) return 1; /* buffer full */
+  if (ilen >= sizeof(ibuf)) return 1;
 
   DWORD got = 0;
   if (!ReadFile(IN, ibuf + ilen, (DWORD)(sizeof(ibuf) - ilen), &got, 0))
@@ -41,26 +45,20 @@ static int readline(char* out, DWORD cap){
   DWORD used = 0;
 
   for (;;){
-    /* 先在緩衝中找 \n */
     for (; ipos < ilen; ++ipos){
       char c = ibuf[ipos];
       if (c == '\r') continue;
-      if (c == '\n'){ /* 完整一行 */
-        ipos++;
-        out[used] = 0;
-        return 1;
-      }
+      if (c == '\n'){ ipos++; out[used] = 0; return 1; }
       if (used + 1 < cap) out[used++] = c;
     }
-    /* 沒找到 \n，嘗試再讀些資料；若讀不到則當 EOF */
     if (!fill_input()){
       out[used] = 0;
-      return used > 0; /* 最後一行無換行也可回傳 */
+      return used > 0;
     }
   }
 }
 
-/* -------- 簡易 token 解析 -------- */
+/* ---- 簡易工具 ---- */
 static void trim(char* s){
   DWORD L=s_len(s), i=0, j=L;
   while(i<L && (s[i]==' '||s[i]=='\t')) ++i;
@@ -68,36 +66,21 @@ static void trim(char* s){
   if (i>0){ for(DWORD k=0;k<j-i;++k) s[k]=s[i+k]; s[j-i]=0; } else s[L]=0;
 }
 
-static char* next_token(char* s, char** token){
-  char* p=s;
-  while(*p==' '||*p=='\t') ++p;
-  if(!*p){ *token=0; return p; }
-  char* start=p; char* outp=p; int quoted=0;
-  if(*p=='"'){ quoted=1; ++p; start=p; }
-  for(;;){
-    char c=*p++;
-    if(c==0) break;
-    if(quoted){ if(c=='"') break; }
-    else { if(c==' '||c=='\t'){ --p; break; } }
-    *outp++ = c;
-  }
-  *outp=0; *token = start;
-  while(*p==' '||*p=='\t') ++p;
-  return p;
-}
-
-/* -------- 指令實作 -------- */
+/* ---- 指令實作 ---- */
 static int cmd_echo(char* args){ trim(args); putln(args); return 0; }
 
+/* 重點：把 run 後面的整段視為目標可執行檔（避免就地分詞的邊界行為） */
 static int cmd_run(char* args){
-  char *prog=0; char* rest = next_token(args, &prog);
-  if(!prog || !*prog){ putln("Usage: run <exe> [args...]"); return 1; }
+  trim(args);
+  if(!*args){ putln("Usage: run <exe> [args...]"); return 1; }
 
+  const char* prog = args;             /* 本測試路徑無空白，直接用整段 */
   STARTUPINFOA si; PROCESS_INFORMATION pi;
   GetStartupInfoA(&si);
 
-  if(!CreateProcessA(prog, (*rest? rest: 0), 0, 0, TRUE, 0, 0, 0, &si, &pi)){
-    putln("CreateProcess failed"); return 1;
+  if(!CreateProcessA(prog, 0, 0, 0, TRUE, 0, 0, 0, &si, &pi)){
+    putln("CreateProcess failed");
+    return 1;
   }
   (void)WaitForSingleObject(pi.hProcess, INFINITE);
   DWORD code=0; GetExitCodeProcess(pi.hProcess, &code);
@@ -127,13 +110,18 @@ void main(void){
     trim(line);
     if(!*line) continue;
 
-    char* tok=0; char* rest = next_token(line, &tok);
-    if(!tok) continue;
+    /* 只取第一個 token 判斷指令，餘下整段交給各指令自己處理 */
+    char* p = line;
+    while(*p==' '||*p=='\t') ++p;
+    char* cmd = p;
+    while(*p && *p!=' ' && *p!='\t') ++p;
+    char* args = (*p ? (p+1) : p);
+    *p = 0;
 
-    if(s_eq(tok,"help")){ show_help(); continue; }
-    if(s_eq(tok,"echo")){ cmd_echo(rest); continue; }
-    if(s_eq(tok,"run")) { (void)cmd_run(rest); continue; }
-    if(s_eq(tok,"exit")){ ExitProcess(0); }
+    if(s_eq(cmd,"help")){ show_help(); continue; }
+    if(s_eq(cmd,"echo")){ cmd_echo(args); continue; }
+    if(s_eq(cmd,"run")) { (void)cmd_run(args); continue; }
+    if(s_eq(cmd,"exit")){ ExitProcess(0); }
 
     putln("Unknown command. Try 'help'");
   }
