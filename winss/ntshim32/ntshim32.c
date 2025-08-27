@@ -6,8 +6,11 @@
 #include <time.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include "../include/win/minwin.h"
 #include "../include/nt/ntdef.h"
+#include "../include/nt/hooks.h"
 
 /* 來自 ntdll32/thread.c 的內部 helper */
 int   _nt_is_thread_handle(HANDLE h);
@@ -61,6 +64,32 @@ __attribute__((noreturn)) void WINAPI ExitProcess(UINT code) {
   _exit((int)code);
 }
 
+/* ---- GetFileType / Console 模式（極簡） ---- */
+DWORD WINAPI GetFileType(HANDLE hFile){
+  int fd = map_handle((DWORD)(uintptr_t)hFile);
+  if (fd >= 0 && fd <= 2) return FILE_TYPE_CHAR;
+  /* 其他情況先當作磁碟檔即可（簡化） */
+  return FILE_TYPE_DISK;
+}
+
+BOOL WINAPI GetConsoleMode(HANDLE h, LPDWORD mode){
+  if (mode) *mode = 0; /* 簡化回報為 0（不支援任何特殊旗標） */
+  return TRUE;
+}
+
+BOOL WINAPI SetConsoleMode(HANDLE h, DWORD mode){
+  (void)h; (void)mode;
+  return TRUE; /* 接受但實際不做事 */
+}
+
+BOOL WINAPI FlushFileBuffers(HANDLE h){
+  int fd = map_handle((DWORD)(uintptr_t)h);
+  if (fd < 0) return FALSE;
+  /* 對 stdout/stderr 就不 fsync，直接視為成功；stdin 返回成功亦無害 */
+  if (fd > 2) (void)fsync(fd);
+  return TRUE;
+}
+
 /* ---- 命令列 ---- */
 static char  g_cmdlineA[512] = "AwAProcess";
 static WCHAR g_cmdlineW[512] = { 'A','w','A','P','r','o','c','e','s','s',0 };
@@ -88,10 +117,6 @@ LPCWSTR WINAPI GetCommandLineW(void) { return g_cmdlineW; }
 /* 我們用假的 HMODULE（常量 1）代表 kernel32，本質是從 NT_HOOKS 查 */
 static HMODULE g_kernel32 = (HMODULE)(uintptr_t)1;
 
-/* 與 loader/其他單元共享的 Hook 類型（只宣告一次） */
-struct Hook { const char* dll; const char* name; void* fn; };
-
-/* 供本檔內部查找時使用 */
 static int ieq(const char* a, const char* b){
   for (; *a && *b; ++a,++b){
     int ca = (*a>='A'&&*a<='Z') ? (*a+32) : (unsigned char)*a;
@@ -100,10 +125,6 @@ static int ieq(const char* a, const char* b){
   }
   return *a==0 && *b==0;
 }
-
-/* NT_HOOKS 的定義（對外可見） */
-__attribute__((visibility("default")))
-extern struct Hook NT_HOOKS[]; /* 前置宣告避免順序限制 */
 
 HMODULE WINAPI GetModuleHandleA(LPCSTR name){
   if (!name || !*name) return g_kernel32;
@@ -297,6 +318,12 @@ struct Hook NT_HOOKS[] = {
   {"KERNEL32.DLL","WriteFile",           (void*)WriteFile},
   {"KERNEL32.DLL","ReadFile",            (void*)ReadFile},
   {"KERNEL32.DLL","ExitProcess",         (void*)ExitProcess},
+
+  {"KERNEL32.DLL","GetFileType",         (void*)GetFileType},
+  {"KERNEL32.DLL","GetConsoleMode",      (void*)GetConsoleMode},
+  {"KERNEL32.DLL","SetConsoleMode",      (void*)SetConsoleMode},
+  {"KERNEL32.DLL","FlushFileBuffers",    (void*)FlushFileBuffers},
+
   {"KERNEL32.DLL","CreateProcessA",      (void*)CreateProcessA},
   {"KERNEL32.DLL","CreateProcessW",      (void*)CreateProcessW},
   {"KERNEL32.DLL","WaitForSingleObject", (void*)WaitForSingleObject},
@@ -304,9 +331,9 @@ struct Hook NT_HOOKS[] = {
   {"KERNEL32.DLL","CloseHandle",         (void*)CloseHandle},
   {"KERNEL32.DLL","GetCommandLineA",     (void*)GetCommandLineA},
   {"KERNEL32.DLL","GetCommandLineW",     (void*)GetCommandLineW},
-  /* 模組/符號查詢（部分工具鏈會用到） */
   {"KERNEL32.DLL","GetModuleHandleA",    (void*)GetModuleHandleA},
   {"KERNEL32.DLL","GetProcAddress",      (void*)GetProcAddress},
+
   /* Threads & TLS */
   {"KERNEL32.DLL","CreateThread",        (void*)CreateThread},
   {"KERNEL32.DLL","ExitThread",          (void*)ExitThread},
