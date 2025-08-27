@@ -85,15 +85,13 @@ jobs:
           export AWAOS_LOG=1
           printf "run ./tests/win32-hello/hello.exe\nexit\n" \
             | /usr/lib/awaos/pe_loader32 ./tests/win32-cmdlite/cmdlite.exe \
-              > cmdlite.out 2>&1 || true
+              > cmdlite.out 2> cmdlite.err || true
 
           echo "==== cmdlite.out ===="; cat cmdlite.out
+          echo "==== cmdlite.err ===="; cat cmdlite.err || true
 
-          # 濾掉 [ntshim32]/[pe_loader32] 的日誌行後再檢查
-          sed -E '/^\[(ntshim32|pe_loader32)\]/d' cmdlite.out \
-           | tr -d '\r' \
-           | grep -F "exit code: 0"
-
+          # 行尾有 \r，用 tr 清掉避免平台差異
+          tr -d '\r' < cmdlite.out | grep -F "exit code: 0"
           ! grep -F "Unknown command" cmdlite.out
 
       - name: Build & Run TLS demo
