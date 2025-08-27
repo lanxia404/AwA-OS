@@ -88,10 +88,10 @@ LPCWSTR WINAPI GetCommandLineW(void) { return g_cmdlineW; }
 /* 我們用假的 HMODULE（常量 1）代表 kernel32，本質是從 NT_HOOKS 查 */
 static HMODULE g_kernel32 = (HMODULE)(uintptr_t)1;
 
-/* 與 ntshim32 的 Hook 表一致 */
+/* 與 loader/其他單元共享的 Hook 類型（只宣告一次） */
 struct Hook { const char* dll; const char* name; void* fn; };
-extern struct Hook NT_HOOKS[];
 
+/* 供本檔內部查找時使用 */
 static int ieq(const char* a, const char* b){
   for (; *a && *b; ++a,++b){
     int ca = (*a>='A'&&*a<='Z') ? (*a+32) : (unsigned char)*a;
@@ -100,6 +100,10 @@ static int ieq(const char* a, const char* b){
   }
   return *a==0 && *b==0;
 }
+
+/* NT_HOOKS 的定義（對外可見） */
+__attribute__((visibility("default")))
+extern struct Hook NT_HOOKS[]; /* 前置宣告避免順序限制 */
 
 HMODULE WINAPI GetModuleHandleA(LPCSTR name){
   if (!name || !*name) return g_kernel32;
@@ -287,8 +291,6 @@ BOOL WINAPI CloseHandle(HANDLE h) {
 }
 
 /* ---- 匯入解析表 ---- */
-struct Hook { const char* dll; const char* name; void* fn; };
-
 __attribute__((visibility("default")))
 struct Hook NT_HOOKS[] = {
   {"KERNEL32.DLL","GetStdHandle",        (void*)GetStdHandle},
