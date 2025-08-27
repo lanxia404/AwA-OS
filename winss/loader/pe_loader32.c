@@ -13,6 +13,8 @@
 #include "../include/win/minwin.h"      // basic Win types/macros for tests
 #include "../ntshim32/ntshim_api.h"     // Nt shim API (teb/tls/thread/err)
 #include "../include/nt/hooks.h"        // Hook entry table decl
+#include <stdlib.h>
+#include "../ntdll32/teb_tls.h"      // 改用 nt_teb_setup_for_current 聲明
 
 #ifndef PAGE_SIZE
 #define PAGE_SIZE 4096
