@@ -71,11 +71,31 @@ BOOL WINAPI WriteFile(HANDLE h, LPCVOID buf, DWORD len, LPDWORD written, LPVOID 
   if (written) *written = (DWORD)((n < 0) ? 0 : n);
   return (n >= 0) ? TRUE : FALSE;
 }
-BOOL WINAPI ReadFile(HANDLE h, LPVOID buf, DWORD toRead, LPDWORD out, LPVOID overlapped){
-  (void)overlapped; int fd = map_handle(h); if (fd < 0) return FALSE;
-  if (toRead == 0) { if (out) *out = 0; return TRUE; }
+
+// ReadFile 
+
+BOOL WINAPI ReadFile(HANDLE h, LPVOID buf, DWORD toRead, LPDWORD out, LPVOID overlapped) {
+  (void)overlapped;
+  if (out) *out = 0;
+
+  // 把 Windows 概念句柄 (-10/-11/-12) 轉換到 Linux fd (0/1/2)
+  int fd = map_handle((DWORD)(uintptr_t)h);
+  if (fd < 0) {
+    // ERROR_INVALID_HANDLE
+    SetLastError(6);
+    return FALSE;
+  }
+
+  if (toRead == 0) {
+    return TRUE;
+  }
+
   ssize_t n = read(fd, buf, (size_t)toRead);
-  if (n < 0) return FALSE;
+  if (n < 0) {
+    // 讀取失敗：保留 errno -> 轉成合適的 Win32 錯誤碼的話可再細化
+    return FALSE;
+  }
+
   if (out) *out = (DWORD)n;
   return TRUE;
 }
