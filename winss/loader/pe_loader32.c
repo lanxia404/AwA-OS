@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <ctype.h>
 #include "../include/win/minwin.h"
+#include "../include/nt/hooks.h"
 
 /* 弱符號：若與 ntdll32 連結，能初始化 TEB；否則自動略過 */
 __attribute__((weak)) void* NtCurrentTeb(void);
@@ -88,7 +89,6 @@ typedef struct { uint32_t VirtualAddress, SizeOfBlock; } IMAGE_BASE_RELOCATION;
 #pragma pack(pop)
 
 /* 與 ntshim32 對應的 Hook 表 */
-struct Hook { const char* dll; const char* name; void* fn; };
 extern struct Hook NT_HOOKS[];
 
 static void die(const char* s){ perror(s); _exit(127); }
