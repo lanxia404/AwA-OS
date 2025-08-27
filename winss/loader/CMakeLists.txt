@@ -2,8 +2,17 @@ cmake_minimum_required(VERSION 3.16)
 
 add_executable(pe_loader32
   pe_loader32.c
+  pe_spawn_shim.c    # 新增的 shim
 )
 
+target_include_directories(pe_loader32 PRIVATE
+  ../include
+  ../ntshim32
+)
+
+target_link_libraries(pe_loader32 PRIVATE ntshim32 pthread)
+
+install(TARGETS pe_loader32 RUNTIME DESTINATION lib/awaos)
 target_include_directories(pe_loader32 PRIVATE
   ${CMAKE_CURRENT_LIST_DIR}/../include
 )
