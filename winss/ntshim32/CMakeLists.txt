@@ -1,7 +1,5 @@
-# winss/ntshim32/CMakeLists.txt
 cmake_minimum_required(VERSION 3.16)
 
-# 將 ntdll32 的實作直接編入這個靜態庫
 add_library(ntshim32 STATIC
   ntshim32.c
   ../ntdll32/teb.c
@@ -14,8 +12,9 @@ target_include_directories(ntshim32 PUBLIC
   ${CMAKE_CURRENT_LIST_DIR}/../include
 )
 
-# 32-bit 構建已在頂層開啟；這裡保守再加一份
+# 32-bit 編譯與連結
 target_compile_options(ntshim32 PRIVATE -m32 -fvisibility=hidden)
+target_link_options(ntshim32 PRIVATE -m32)
 
-# 這些檔案使用 pthread / eventfd
+# thread.c 依賴 pthread
 target_link_libraries(ntshim32 PUBLIC pthread)
