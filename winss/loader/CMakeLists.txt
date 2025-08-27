@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 
 add_executable(pe_loader32
   pe_loader32.c 
+  hooks_table.c
 )
 
 target_include_directories(pe_loader32 PRIVATE
